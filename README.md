@@ -1,6 +1,10 @@
 # predict-bot-pro
 
-Predict.fun 自动挂单机器人。
+Predict.fun 自动做市与风控机器人，负责自动挂单、挂单监控撤单、持仓检测和平仓处理。
+
+核心原则是与 Polymarket 对齐：以 Polymarket 更好的买盘流动性和价格作为外部锚点，只在 Predict 价格不高于 Polymarket 或偏差很小时挂单，并在偏离时快速撤单，尽量减少被塞订单和被动持仓风险。
+
+机器人只处理当前有积分奖励的 Predict 市场，不对无积分奖励市场挂单。
 
 ## 安装
 
@@ -12,14 +16,13 @@ npm install
 
 项目使用 `.env` 配置运行参数，`.env` 和 `.env.*` 已加入 `.gitignore`，不要提交私钥、API Key、账户地址等敏感信息。
 
-需要的变量包括：
+先复制示例环境变量文件：
 
-```env
-PREDICT_API_KEY=
-PRIVY_PRIVATE_KEY=
-PREDICT_ACCOUNT=
-RPC_URL=https://rpc.ankr.com/bsc,https://bsc-dataseed.binance.org
+```bash
+cp .env.example .env
 ```
+
+然后在 `.env` 中填写真实的 API Key、私钥、账户地址和 RPC 地址。
 
 `RPC_URL` 支持多个 BSC RPC 地址，用英文逗号分隔。查询余额时如果当前 RPC 失败，会自动切换到下一个 RPC。
 
