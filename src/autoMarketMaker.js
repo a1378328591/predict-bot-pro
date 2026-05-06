@@ -527,7 +527,6 @@ async function getBestBid(marketId) {
     }
     const bestBid = bids.map(parseDepthLevel).filter(Boolean).sort((a, b) => b.price - a.price)[0];
     const price = bestBid?.price ?? null;
-    console.log("  💰 买一价: " + price + " (" + bids.length + "个买单)");
     return price;
   } catch (e) { 
     console.log("  ⚠️ getBestBid错误: " + e.message);

@@ -28,11 +28,31 @@ cp .env.example .env
 
 ## 运行
 
+使用 PM2 后台运行：
+
 ```bash
-npm run market-maker
+pm2 start src/autoMarketMaker.js --name predict-bot --update-env
 ```
 
-不要使用 `>` 重定向日志。`autoMarketMaker.js` 会用 UTF-8 自动写入：
+查看运行日志：
+
+```bash
+pm2 logs predict-bot
+```
+
+修改代码或 `.env` 后重启：
+
+```bash
+pm2 restart predict-bot --update-env
+```
+
+停止机器人：
+
+```bash
+pm2 stop predict-bot
+```
+
+不要使用 `>` 重定向日志。PM2 会输出进程日志，`autoMarketMaker.js` 也会用 UTF-8 自动写入：
 
 ```text
 autoMarketMaker.log
