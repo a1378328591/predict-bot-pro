@@ -117,6 +117,7 @@ function getPositionQuantityWei(pos) {
 function getPositionBuyPrice(pos) {
   const candidates = [
     pos?.averagePrice,
+    pos?.averageBuyPriceUsd,
     pos?.averageEntryPrice,
     pos?.avgPrice,
     pos?.avgEntryPrice,
@@ -196,6 +197,7 @@ async function getMarkets() {
       const query = new URLSearchParams({
         first: String(MARKET_PAGE_SIZE),
         status: "OPEN",
+        hasActiveRewards: "true",
         sort: "VOLUME_24H_DESC",
       });
       if (after) query.set("after", after);

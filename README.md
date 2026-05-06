@@ -1,98 +1,130 @@
-# 针对node v16版本写的
-mkdir predict-bot
-cd predict-bot
+# predict-bot-pro
 
-npm init -y
+Predict.fun 自动挂单机器人。
 
-npm install typescript ts-node dotenv node-fetch@2 ethers@6 @predictdotfun/sdk
+## 安装
 
-
-
-本地运行：
-```
-node ./src/positionMonitor.js
+```bash
+npm install
 ```
 
+## 环境变量
 
-服务器：
+项目使用 `.env` 配置运行参数，`.env` 和 `.env.*` 已加入 `.gitignore`，不要提交私钥、API Key、账户地址等敏感信息。
+
+需要的变量包括：
+
+```env
+PREDICT_API_KEY=
+PRIVY_PRIVATE_KEY=
+PREDICT_ACCOUNT=
+RPC_URL=https://rpc.ankr.com/bsc,https://bsc-dataseed.binance.org
 ```
-#这里没用pm2
-# 确认有没有在后台运行
-ps aux | grep positionMonitor.js
-# 查看日志
-tail -f monitor.log
-# 切换目录 和 后台执行
-cd predict-bot/
-nohup node src/positionMonitor.js > monitor.log 2>&1 &
+
+`RPC_URL` 支持多个 BSC RPC 地址，用英文逗号分隔。查询余额时如果当前 RPC 失败，会自动切换到下一个 RPC。
+
+## 运行
+
+```bash
+npm run market-maker
 ```
 
+不要使用 `>` 重定向日志。`autoMarketMaker.js` 会用 UTF-8 自动写入：
 
+```text
+autoMarketMaker.log
+```
 
+## autoMarketMaker.js 主要逻辑
 
+脚本启动后同时运行三个互不影响的循环：
 
+1. 自动挂单主循环
+2. 高频挂单风控监控
+3. 高频持仓平仓监控
 
+### 自动挂单
 
-───
+自动挂单主循环每 5 分钟执行一轮。
 
-📋 Predict.fun 自动做市机器人 - 部署总结
+每轮会分页遍历 Predict.fun 所有 `OPEN` 且当前有积分奖励的市场，每页 100 条，不再只处理前 100 个市场。
 
-代码入口
+市场基础过滤：
 
-~/.openclaw/workspace/predict-bot/src/autoMarketMaker.js
+- 跳过标题包含 `btc` 或 `bitcoin` 的市场
+- 只处理 `hasActiveRewards=true` 的市场
+- 只处理包含 `polymarketConditionIds` 的市场
+- 已写入 `blockedMarkets.json` 的市场不再挂单
 
-启动命令
+挂单风控：
 
-cd ~/.openclaw/workspace/predict-bot
-nohup node src/autoMarketMaker.js > autoMarketMaker.log 2>&1 &
+- Predict 买一价格低于 `0.25` 不挂
+- Predict 买一价格高于 `0.99` 不挂
+- 必须能映射到 Polymarket 对应 outcome 的 CLOB token
+- Polymarket 必须有买一
+- Polymarket 买一金额必须大于等于 `1000u`
+- 如果 Predict 买一高于 Polymarket 买一超过 `0.001`，不挂
+- 如果 Predict 买一小于或等于 Polymarket 买一，允许挂
+- 运动/电竞类市场会读取 Polymarket 开始时间
+- 接近开赛的市场不挂
+- 支持订单过期时间，运动/电竞订单设置为开赛前 15 分钟失效
 
-查看日志
+挂单节流：
 
-tail -f ~/.openclaw/workspace/predict-bot/autoMarketMaker.log
+- 每个市场之间等待 1 秒
+- 同一市场每个 outcome 之间等待 500ms
+- Yes 和 No 会分别独立判断风控，满足条件就分别挂单
 
-停止脚本
+挂单金额：
 
-pkill -f autoMarketMaker
+- 每单使用当前 USDT 余额的 95%
 
-───
+### 高频挂单监控
 
-已实现的功能
+挂单监控每 3 秒独立运行一次，不依赖自动挂单主循环。
 
-| 需求               | 状态 | 说明                        |
-| ------------------ | ---- | --------------------------- |
-| 挂单金额 = 余额95% | ✅    | 每单使用账户余额的95%       |
-| 前100个市场        | ✅    | 按 VOLUME_24H_DESC 排序     |
-| YES/NO双边挂单     | ✅    | 每个市场两个方向都挂        |
-| 已有挂单则跳过     | ✅    | 避免重复挂单                |
-| 过滤BTC市场        | ✅    | 跳过标题含BTC/Bitcoin的市场 |
-| 独立平仓功能       | ✅    | 持仓检测并市价卖出          |
-| 错误捕获           | ✅    | 单个市场失败不影响其他      |
+监控逻辑是保守风控：能确认安全才继续挂着，确认不了安全就撤单。
 
-───
+撤单条件包括：
 
-当前状态
+- 市场已进入 `blockedMarkets.json`
+- 找不到 Polymarket 映射
+- 找不到对应 outcome
+- Polymarket 无买一
+- Polymarket 买一金额低于 `1000u`
+- Predict 买一高于 Polymarket 买一超过 `0.001`
+- 市场已接近开赛
+- 单个订单监控发生异常
 
-从日志看，余额仅剩 0.87 USDT，说明：
+如果本轮获取 open orders 失败，会使用上一轮缓存的挂单继续尝试风控撤单，避免因为接口异常导致监控停摆。
 
-1. ✅ 之前的挂单已经成功
-2. ✅ 并且已经成交（被吃了）
-3. ❓ 但平仓（卖出）可能有问题，导致资金没有回笼
+### 高频持仓平仓
 
-需要检查：
+持仓监控每 3 秒独立运行一次，不依赖挂单主循环或挂单监控。
 
-• 持仓是否被正确检测
-• 市价卖出是否成功
+检测到持仓后：
 
-要继续运行，需要：
+- 立刻把对应市场写入 `blockedMarkets.json`
+- 后续不再给该市场挂买单
+- 如果已有卖单，不重复挂卖单
+- 自动平仓使用限价卖单，不使用市价卖单
+- 最多接受 3 个价差，例如 0.30 买入，最低只会 0.27 卖出
+- 卖出前检查 Predict 订单簿买盘流动性
+- 只有高于等于最低卖价的买盘数量足够覆盖持仓时才挂限价卖单
+- 如果流动性不足，本轮放弃卖出，下一轮继续检查
+- 如果无法识别持仓买入价，不盲卖，只记录并等待
 
-1. 充值 USDT 到账户
-2. 或检查为什么平仓没有成功卖出持仓
+## 本地文件
 
-───
+以下文件属于本地运行数据，不应提交：
 
-配置文件
+```text
+.env
+.env.*
+*.log
+*.pid
+blockedMarkets.json
+node_modules/
+```
 
-环境变量在 ~/.openclaw/workspace/predict-bot/.env：
-
-PRIVY_PRIVATE_KEY=xxx
-PREDICT_ACCOUNT=0x5d7B3a48Dbb29b7E6ABcD82EC36Ea2276809eA4B
-PREDICT_API_KEY=xxx
+`blockedMarkets.json` 用于记录已经成交或需要永久跳过的市场，避免同一市场被再次挂单。
