@@ -94,6 +94,10 @@ function getOrderId(order) {
   return order?.id ?? order?.orderId ?? order?.hash ?? order?.order?.hash;
 }
 
+function getOrderCancelId(order) {
+  return order?.order?.hash ?? order?.hash ?? getOrderId(order);
+}
+
 function getOrderMarketId(order) {
   return order?.market?.id ?? order?.marketId;
 }
@@ -629,25 +633,26 @@ function detectFilledTrackedOrders(openOrders) {
 
 async function monitorSingleOrder(order, openOrders, predictBidCache) {
   const orderId = getOrderId(order);
+  const cancelId = getOrderCancelId(order);
   const marketId = getOrderMarketId(order);
   const tokenId = getOrderTokenId(order);
-  if (!orderId || !marketId || !tokenId) return;
+  if (!orderId || !cancelId || !marketId || !tokenId) return;
 
   try {
     const market = latestMarketsById.get(String(marketId)) ?? order.market;
     if (blockedMarkets.has(String(marketId))) {
-      await cancelOrder(orderId);
+      await cancelOrder(cancelId);
       return;
     }
 
     if (!market?.polymarketConditionIds?.length) {
-      await cancelOrder(orderId);
+      await cancelOrder(cancelId);
       return;
     }
 
     const outcome = market.outcomes?.find(o => String(o.onChainId) === String(tokenId)) ?? order.outcome;
     if (!outcome) {
-      await cancelOrder(orderId);
+      await cancelOrder(cancelId);
       return;
     }
 
@@ -663,16 +668,16 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     ]);
 
     if (!polyQuote.ok) {
-      await cancelOrder(orderId);
+      await cancelOrder(cancelId);
       return;
     }
 
     if (!predictBid || Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
-      await cancelOrder(orderId);
+      await cancelOrder(cancelId);
     }
   } catch (e) {
     console.log("⚠️ 监控异常，保守撤单:", orderId, e.message);
-    await cancelOrder(orderId);
+    await cancelOrder(cancelId);
   }
 }
 
