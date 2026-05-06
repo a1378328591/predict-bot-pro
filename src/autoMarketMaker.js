@@ -94,10 +94,6 @@ function getOrderId(order) {
   return order?.id ?? order?.orderId ?? order?.hash ?? order?.order?.hash;
 }
 
-function getOrderCancelId(order) {
-  return order?.order?.hash ?? order?.hash ?? getOrderId(order);
-}
-
 function getOrderMarketId(order) {
   return order?.market?.id ?? order?.marketId;
 }
@@ -374,11 +370,16 @@ async function cancelOrder(orderId) {
   cancelingOrders.add(key);
   try {
     const jwt = await getJwtTokenWithSDK();
-    const res = await fetch("https://api.predict.fun/v1/orders/" + orderId + "/cancel", {
+    const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
-      headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": PREDICT_API_KEY,
+        "Authorization": "Bearer " + jwt,
+      },
+      body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
-    if (!res.ok) throw new Error("cancel status " + res.status);
+    if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 已撤单:", orderId);
   } catch (e) {
     cancelingOrders.delete(key);
@@ -633,26 +634,25 @@ function detectFilledTrackedOrders(openOrders) {
 
 async function monitorSingleOrder(order, openOrders, predictBidCache) {
   const orderId = getOrderId(order);
-  const cancelId = getOrderCancelId(order);
   const marketId = getOrderMarketId(order);
   const tokenId = getOrderTokenId(order);
-  if (!orderId || !cancelId || !marketId || !tokenId) return;
+  if (!orderId || !marketId || !tokenId) return;
 
   try {
     const market = latestMarketsById.get(String(marketId)) ?? order.market;
     if (blockedMarkets.has(String(marketId))) {
-      await cancelOrder(cancelId);
+      await cancelOrder(orderId);
       return;
     }
 
     if (!market?.polymarketConditionIds?.length) {
-      await cancelOrder(cancelId);
+      await cancelOrder(orderId);
       return;
     }
 
     const outcome = market.outcomes?.find(o => String(o.onChainId) === String(tokenId)) ?? order.outcome;
     if (!outcome) {
-      await cancelOrder(cancelId);
+      await cancelOrder(orderId);
       return;
     }
 
@@ -668,16 +668,16 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     ]);
 
     if (!polyQuote.ok) {
-      await cancelOrder(cancelId);
+      await cancelOrder(orderId);
       return;
     }
 
     if (!predictBid || Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
-      await cancelOrder(cancelId);
+      await cancelOrder(orderId);
     }
   } catch (e) {
     console.log("⚠️ 监控异常，保守撤单:", orderId, e.message);
-    await cancelOrder(cancelId);
+    await cancelOrder(orderId);
   }
 }
 
