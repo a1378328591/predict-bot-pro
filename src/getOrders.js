@@ -54,7 +54,7 @@ if (process.argv[1].endsWith("getOrders.js")) {
   getOrders({ first: 100 })
     .then(orders => {
       console.log("✅ 订单列表获取成功，共", orders.length, "条");
-      console.log(orders); // 直接打印原始数组
+      console.log(orders.map(order => ({ id: order.id, status: order.status, marketId: order.marketId })));
     })
     .catch(err => {
       console.error("❌ 获取订单失败：", err);

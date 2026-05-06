@@ -36,7 +36,6 @@ export async function getJwtToken() {
   }
 
   const message = msgJson.data.message;
-  console.log('message', message)
 
   // 2️⃣ 对 message 签名
   const signature = await wallet.signMessage(message);
@@ -74,9 +73,8 @@ export async function getJwtToken() {
  */
 if (process.argv[1].endsWith("getJwtToken.js")) {
   getJwtToken()
-    .then(token => {
-      console.log("✅ JWT Token 获取成功：\n");
-      console.log(token);
+    .then(() => {
+      console.log("✅ JWT Token 获取成功");
     })
     .catch(err => {
       console.error("❌ 获取 JWT Token 失败：", err);

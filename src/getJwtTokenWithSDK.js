@@ -130,9 +130,8 @@ function decodeJwt(token) {
  */
 if (process.argv[1].endsWith("getJwtTokenWithSDK.js")) {
   getJwtTokenWithSDK()
-    .then((token) => {
+    .then(() => {
       console.log("✅ JWT Token 获取成功");
-      console.log(token);
     })
     .catch((err) => {
       console.error("❌ 获取 JWT Token 失败：", err);

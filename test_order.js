@@ -68,7 +68,7 @@ async function test() {
   
   // 序列化 BigInt
   const body = JSON.stringify(payload, (_, v) => typeof v === 'bigint' ? v.toString() : v);
-  console.log('Body preview:', body.slice(0, 500));
+  console.log('Body prepared');
 
   const jwt = await getJwtTokenWithSDK();
   
@@ -84,7 +84,7 @@ async function test() {
 
   const responseText = await orderRes.text();
   console.log('Response status:', orderRes.status);
-  console.log('Response:', responseText.slice(0, 500));
+  console.log('Response:', responseText.slice(0, 200));
 }
 
 test().catch(console.error);
