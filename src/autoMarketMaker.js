@@ -516,6 +516,11 @@ function getSellLiquidity(book, minPrice) {
   return { bestPrice: usableBids[0]?.price ?? null, size };
 }
 
+function roundSellPriceWei(price) {
+  const cents = Math.ceil(price * 100 - 1e-9);
+  return BigInt(cents) * 10n ** 16n;
+}
+
 // 获取订单簿买一价
 async function getBestBid(marketId) {
   try {
@@ -585,7 +590,7 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    const sellPriceWei = BigInt(Math.floor(minSellPrice * 1e18));
+    const sellPriceWei = roundSellPriceWei(minSellPrice);
     if (sellPriceWei <= 0n) return;
     const market = latestMarketsById.get(String(marketId)) ?? pos.market;
     console.log("📤 平仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buy=" + buyPrice.toFixed(3) + " minSell=" + minSellPrice.toFixed(3) + " bestBid=" + liquidity.bestPrice);
