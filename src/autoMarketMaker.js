@@ -364,11 +364,12 @@ async function getPositions() {
 }
 
 // 取消订单
-async function cancelOrder(orderId) {
+async function cancelOrder(orderId, reason) {
   const key = String(orderId);
   if (cancelingOrders.has(key)) return;
   cancelingOrders.add(key);
   try {
+    if (reason) console.log("🧯 准备撤单:", orderId, reason);
     const jwt = await getJwtTokenWithSDK();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
@@ -380,7 +381,7 @@ async function cancelOrder(orderId) {
       body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
-    console.log("🧯 已撤单:", orderId);
+    console.log("🧯 已撤单:", orderId, reason || "");
   } catch (e) {
     cancelingOrders.delete(key);
     console.log("⚠️ 撤单失败:", orderId, e.message);
@@ -644,19 +645,22 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
 
   try {
     const market = latestMarketsById.get(String(marketId)) ?? order.market;
+    const marketTitle = market?.question || market?.title || order?.market?.question || order?.market?.title || "";
+    const orderSide = order?.side ?? order?.order?.side ?? "";
+    const orderPrice = order?.price ?? order?.pricePerShare ?? order?.order?.pricePerShare ?? "";
     if (blockedMarkets.has(String(marketId))) {
-      await cancelOrder(orderId);
+      await cancelOrder(orderId, "市场在黑名单 marketId=" + marketId + " title=" + marketTitle);
       return;
     }
 
     if (!market?.polymarketConditionIds?.length) {
-      await cancelOrder(orderId);
+      await cancelOrder(orderId, "缺少Polymarket映射 marketId=" + marketId + " title=" + marketTitle + " orderSide=" + orderSide + " orderPrice=" + orderPrice);
       return;
     }
 
     const outcome = market.outcomes?.find(o => String(o.onChainId) === String(tokenId)) ?? order.outcome;
     if (!outcome) {
-      await cancelOrder(orderId);
+      await cancelOrder(orderId, "找不到outcome marketId=" + marketId + " tokenId=" + tokenId + " title=" + marketTitle);
       return;
     }
 
@@ -672,16 +676,20 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     ]);
 
     if (!polyQuote.ok) {
-      await cancelOrder(orderId);
+      await cancelOrder(orderId, "Polymarket校验失败 marketId=" + marketId + " outcome=" + outcome.name + " reason=" + polyQuote.reason + " predictBid=" + predictBid + " title=" + marketTitle);
       return;
     }
 
     if (!predictBid || Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
-      await cancelOrder(orderId);
+      const diff = predictBid ? Number(predictBid) - polyQuote.price : null;
+      await cancelOrder(orderId, "价格风控 marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " polyBid=" + polyQuote.price + " diff=" + diff + " tolerance=" + PRICE_TOLERANCE + " polyUsd=" + polyQuote.valueUsd.toFixed(2) + " title=" + marketTitle);
+      return;
     }
+
+    console.log("✅ 挂单监控通过 orderId=" + orderId + " marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " polyBid=" + polyQuote.price + " polyUsd=" + polyQuote.valueUsd.toFixed(2) + " title=" + marketTitle);
   } catch (e) {
     console.log("⚠️ 监控异常，保守撤单:", orderId, e.message);
-    await cancelOrder(orderId);
+    await cancelOrder(orderId, "监控异常 marketId=" + marketId + " tokenId=" + tokenId + " error=" + e.message);
   }
 }
 
