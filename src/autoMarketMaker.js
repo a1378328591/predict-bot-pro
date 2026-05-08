@@ -54,6 +54,8 @@ let latestOpenOrders = [];
 let monitorRunning = false;
 let positionMonitorRunning = false;
 const closingPositions = new Set();
+let monitorLoopCount = 0;
+let positionMonitorLoopCount = 0;
 
 function loadBlockedMarkets() {
   try {
@@ -545,6 +547,16 @@ function parseDepthLevel(level) {
   return { price, size };
 }
 
+function getBestPredictBidFromBook(book) {
+  const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
+  return bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
+}
+
+function getBestPredictAskFromBook(book) {
+  const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
+  return asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
+}
+
 function getSellLiquidity(book, minPrice) {
   const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
   const usableBids = bids.filter(bid => bid.price >= minPrice).sort((a, b) => b.price - a.price);
@@ -557,18 +569,16 @@ function roundSellPriceWei(price) {
   return BigInt(cents) * 10n ** 16n;
 }
 
+function roundBuyPriceWei(price) {
+  const cents = Math.floor(price * 100 + 1e-9);
+  return BigInt(cents) * 10n ** 16n;
+}
+
 // 获取订单簿买一价
 async function getBestBid(marketId) {
   try {
     const book = await getPredictBook(marketId);
-    const bids = book?.bids;
-    if (!bids || !bids.length) {
-      console.log("  ⚠️ 无买单 marketId=" + marketId);
-      return null;
-    }
-    const bestBid = bids.map(parseDepthLevel).filter(Boolean).sort((a, b) => b.price - a.price)[0];
-    const price = bestBid?.price ?? null;
-    return price;
+    return getBestPredictBidFromBook(book);
   } catch (e) { 
     console.log("  ⚠️ getBestBid错误: " + e.message);
     return null; 
@@ -648,6 +658,10 @@ async function positionMonitorLoop() {
     positionMonitorRunning = true;
     try {
       const [positions, openOrders] = await Promise.all([getPositions(), getOpenOrders()]);
+      positionMonitorLoopCount++;
+      if (positionMonitorLoopCount % 10 === 1) {
+        console.log("🫀 持仓监控运行中 positions=" + positions.length + " openOrders=" + openOrders.length);
+      }
       await Promise.allSettled(positions.map(pos => closeSinglePosition(pos, openOrders)));
     } catch (e) {
       console.log("⚠️ 持仓监控异常:", e.message);
@@ -759,6 +773,10 @@ async function monitorLoop() {
         openOrders = latestOpenOrders;
       }
       await rememberFilledMarkets();
+      monitorLoopCount++;
+      if (monitorLoopCount % 10 === 1) {
+        console.log("🛰️ 挂单监控运行中 openOrders=" + openOrders.length + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
+      }
       await monitorOpenOrders(openOrders);
     } catch (e) {
       console.log("⚠️ 高频监控异常:", e.message);
@@ -784,12 +802,15 @@ async function processMarket(market, amountWei, existingOrders) {
     return { new: 0, skip: 0 };
   }
 
-  // 获取买一价
-  const price = await getBestBid(market.id);
-  if (!price || Number(price) < MIN_BUY_PRICE || Number(price) > 0.99) {
+  let predictBook;
+  try {
+    predictBook = await getPredictBook(market.id);
+  } catch (e) {
     return { new: 0, skip: 0 };
   }
-  const priceWei = BigInt(Math.floor(parseFloat(price) * 1e18));
+
+  const predictBid = getBestPredictBidFromBook(predictBook);
+  const predictAsk = getBestPredictAskFromBook(predictBook);
 
   let newOrders = 0;
   let skipOrders = 0;
@@ -816,7 +837,24 @@ async function processMarket(market, amountWei, existingOrders) {
       continue;
     }
 
-    if (Number(price) - polyQuote.price > PRICE_TOLERANCE) {
+    const price = predictBid ? Math.max(Number(predictBid), polyQuote.price) : polyQuote.price;
+    if (price < MIN_BUY_PRICE || price > 0.99) {
+      skipOrders++;
+      continue;
+    }
+
+    if (predictAsk && predictAsk <= price + 1e-9) {
+      skipOrders++;
+      continue;
+    }
+
+    if (predictBid && Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
+      skipOrders++;
+      continue;
+    }
+
+    const priceWei = roundBuyPriceWei(price);
+    if (priceWei <= 0n) {
       skipOrders++;
       continue;
     }
