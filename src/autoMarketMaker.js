@@ -102,6 +102,42 @@ function getOrderTokenId(order) {
   return order?.outcome?.onChainId ?? order?.tokenId ?? order?.outcomeId ?? order?.order?.tokenId;
 }
 
+function getOrderSide(order) {
+  return String(order?.side ?? order?.order?.side ?? "").toUpperCase();
+}
+
+function parseOrderPrice(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "bigint") return Number(value) / 1e18;
+  const text = String(value);
+  const price = Number(text);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  if (price <= 1) return price;
+  if (/^\d+$/.test(text) && text.length > 9) return price / 1e18;
+  return null;
+}
+
+function getOrderPrice(order) {
+  const candidates = [
+    order?.price,
+    order?.pricePerShare,
+    order?.order?.pricePerShare,
+  ];
+
+  for (const value of candidates) {
+    const price = parseOrderPrice(value);
+    if (price) return price;
+  }
+
+  const makerAmount = Number(order?.order?.makerAmount ?? order?.makerAmount);
+  const takerAmount = Number(order?.order?.takerAmount ?? order?.takerAmount);
+  if (Number.isFinite(makerAmount) && Number.isFinite(takerAmount) && makerAmount > 0 && takerAmount > 0) {
+    return makerAmount / takerAmount;
+  }
+
+  return null;
+}
+
 function getPositionMarketId(pos) {
   return pos?.market?.id ?? pos?.marketId;
 }
@@ -369,7 +405,6 @@ async function cancelOrder(orderId, reason) {
   if (cancelingOrders.has(key)) return;
   cancelingOrders.add(key);
   try {
-    if (reason) console.log("🧯 准备撤单:", orderId, reason);
     const jwt = await getJwtTokenWithSDK();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
@@ -384,7 +419,7 @@ async function cancelOrder(orderId, reason) {
     console.log("🧯 已撤单:", orderId, reason || "");
   } catch (e) {
     cancelingOrders.delete(key);
-    console.log("⚠️ 撤单失败:", orderId, e.message);
+    console.log("⚠️ 撤单失败:", orderId, reason || "", e.message);
   }
 }
 
@@ -646,8 +681,8 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
   try {
     const market = latestMarketsById.get(String(marketId)) ?? order.market;
     const marketTitle = market?.question || market?.title || order?.market?.question || order?.market?.title || "";
-    const orderSide = order?.side ?? order?.order?.side ?? "";
-    const orderPrice = order?.price ?? order?.pricePerShare ?? order?.order?.pricePerShare ?? "";
+    const orderSide = getOrderSide(order);
+    const orderPrice = getOrderPrice(order);
     if (blockedMarkets.has(String(marketId))) {
       await cancelOrder(orderId, "市场在黑名单 marketId=" + marketId + " title=" + marketTitle);
       return;
@@ -680,15 +715,18 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
       return;
     }
 
+    if (orderSide === "BUY" && orderPrice && predictBid && Number(predictBid) - orderPrice > PRICE_TOLERANCE) {
+      await cancelOrder(orderId, "买单已不是买一 marketId=" + marketId + " outcome=" + outcome.name + " orderPrice=" + orderPrice + " predictBid=" + predictBid + " diff=" + (Number(predictBid) - orderPrice) + " tolerance=" + PRICE_TOLERANCE + " title=" + marketTitle);
+      return;
+    }
+
     if (!predictBid || Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
       const diff = predictBid ? Number(predictBid) - polyQuote.price : null;
       await cancelOrder(orderId, "价格风控 marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " polyBid=" + polyQuote.price + " diff=" + diff + " tolerance=" + PRICE_TOLERANCE + " polyUsd=" + polyQuote.valueUsd.toFixed(2) + " title=" + marketTitle);
       return;
     }
 
-    console.log("✅ 挂单监控通过 orderId=" + orderId + " marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " polyBid=" + polyQuote.price + " polyUsd=" + polyQuote.valueUsd.toFixed(2) + " title=" + marketTitle);
   } catch (e) {
-    console.log("⚠️ 监控异常，保守撤单:", orderId, e.message);
     await cancelOrder(orderId, "监控异常 marketId=" + marketId + " tokenId=" + tokenId + " error=" + e.message);
   }
 }
@@ -735,7 +773,6 @@ async function monitorLoop() {
 // 处理单个市场 - 独立错误处理
 async function processMarket(market, amountWei, existingOrders) {
   if (blockedMarkets.has(String(market.id))) {
-    console.log("  🚫 黑名单跳过: " + market.title?.slice(0,20));
     return { new: 0, skip: 1 };
   }
 
@@ -750,10 +787,8 @@ async function processMarket(market, amountWei, existingOrders) {
   // 获取买一价
   const price = await getBestBid(market.id);
   if (!price || Number(price) < MIN_BUY_PRICE || Number(price) > 0.99) {
-    console.log("  ⚠️ " + market.title?.slice(0,20) + " 价格无效: " + price);
     return { new: 0, skip: 0 };
   }
-  console.log("  💰 价格有效: " + price + " for " + market.title?.slice(0,20));
   const priceWei = BigInt(Math.floor(parseFloat(price) * 1e18));
 
   let newOrders = 0;
@@ -771,38 +806,33 @@ async function processMarket(market, amountWei, existingOrders) {
     });
 
     if (existing) {
-      console.log("  ⏭️ 已有挂单跳过: " + outcome.name);
       skipOrders++;
       continue;
     }
 
     const polyQuote = await getPolymarketQuote(market, outcome);
     if (!polyQuote.ok) {
-      console.log("  ⚠️ Polymarket 跳过: " + polyQuote.reason);
       skipOrders++;
       continue;
     }
 
     if (Number(price) - polyQuote.price > PRICE_TOLERANCE) {
-      console.log("  ⚠️ Predict买一高于Polymarket Predict=" + price + " Poly=" + polyQuote.price);
       skipOrders++;
       continue;
     }
 
     // 挂单
     try {
-      const expireText = polyQuote.expiresAt ? " expire=" + polyQuote.expiresAt.toISOString() : "";
-      console.log("  🚀 " + market.title?.slice(0,15) + " " + outcome.name + " @ " + price + " polyUsd=" + polyQuote.valueUsd.toFixed(2) + expireText);
       const order = await placeBuyLimit(market, outcome, priceWei, amountWei, polyQuote.expiresAt ?? undefined);
       const orderId = getOrderId(order);
       if (orderId) trackedOrders.set(String(orderId), { marketId: market.id, tokenId });
       newOrders++;
-      console.log("  ✅ 成功");
+      console.log("  ✅ 挂单成功 marketId=" + market.id + " outcome=" + outcome.name + " price=" + price);
     } catch (e) {
       if (e.message.includes("insufficient")) {
-        console.log("  ⚠️ 余额不足跳过");
+        console.log("  ⚠️ 挂单失败 marketId=" + market.id + " outcome=" + outcome.name + " reason=余额不足");
       } else {
-        console.log("  ❌ 失败: " + e.message.slice(0,50));
+        console.log("  ❌ 挂单失败 marketId=" + market.id + " outcome=" + outcome.name + " error=" + e.message.slice(0,50));
       }
     }
     await new Promise(r => setTimeout(r, OUTCOME_DELAY_MS));
