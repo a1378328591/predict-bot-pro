@@ -590,6 +590,21 @@ function getSellLiquidity(book, minPrice) {
   return { bestPrice: usableBids[0]?.price ?? null, size };
 }
 
+function getOutcomeSellLiquidity(book, market, outcome, minPrice) {
+  const position = getOutcomePosition(market, outcome);
+  if (position === 1 && market?.outcomes?.length === 2) {
+    const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
+    const usableAsks = asks
+      .map(ask => ({ price: invertBinaryPrice(ask.price), size: ask.size }))
+      .filter(ask => ask.price !== null && ask.price >= minPrice)
+      .sort((a, b) => b.price - a.price);
+    const size = usableAsks.reduce((sum, ask) => sum + ask.size, 0);
+    return { bestPrice: usableAsks[0]?.price ?? null, size };
+  }
+
+  return getSellLiquidity(book, minPrice);
+}
+
 function roundSellPriceWei(price) {
   const cents = Math.ceil(price * 100 - 1e-9);
   return BigInt(cents) * 10n ** 16n;
@@ -654,7 +669,9 @@ async function closeSinglePosition(pos, openOrders) {
 
     const minSellPrice = Math.max(0.01, buyPrice - MAX_CLOSE_SLIPPAGE);
     const book = await getPredictBook(marketId);
-    const liquidity = getSellLiquidity(book, minSellPrice);
+    const market = latestMarketsById.get(String(marketId)) ?? pos.market;
+    const outcome = market?.outcomes?.find(item => String(item.onChainId) === String(tokenId)) ?? pos.outcome;
+    const liquidity = getOutcomeSellLiquidity(book, market, outcome, minSellPrice);
     const quantity = Number(quantityWei) / 1e18;
 
     if (!liquidity.bestPrice || liquidity.size < quantity) {
@@ -664,7 +681,6 @@ async function closeSinglePosition(pos, openOrders) {
 
     const sellPriceWei = roundSellPriceWei(minSellPrice);
     if (sellPriceWei <= 0n) return;
-    const market = latestMarketsById.get(String(marketId)) ?? pos.market;
     console.log("📤 平仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buy=" + buyPrice.toFixed(3) + " minSell=" + minSellPrice.toFixed(3) + " bestBid=" + liquidity.bestPrice);
     await placeSellLimit(market, tokenId, sellPriceWei, quantityWei);
   } catch (e) {
