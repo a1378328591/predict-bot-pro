@@ -551,14 +551,36 @@ function parseDepthLevel(level) {
   return { price, size };
 }
 
-function getBestPredictBidFromBook(book) {
-  const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
-  return bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
+function getOutcomePosition(market, outcome) {
+  const outcomes = Array.isArray(market?.outcomes) ? market.outcomes : [];
+  const byToken = outcomes.findIndex(item => String(item.onChainId) === String(outcome?.onChainId));
+  if (byToken >= 0) return byToken;
+
+  const indexSetIndex = Number(outcome?.indexSet) - 1;
+  if (indexSetIndex >= 0) return indexSetIndex;
+
+  return null;
 }
 
-function getBestPredictAskFromBook(book) {
+function invertBinaryPrice(price) {
+  if (!Number.isFinite(Number(price))) return null;
+  return Number((1 - Number(price)).toFixed(6));
+}
+
+function getBestPredictBidFromBook(book, market, outcome) {
+  const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
+  const bestBid = bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
+  const position = getOutcomePosition(market, outcome);
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictAskFromBook(book));
+  return bestBid;
+}
+
+function getBestPredictAskFromBook(book, market, outcome) {
   const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
-  return asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
+  const bestAsk = asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
+  const position = getOutcomePosition(market, outcome);
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictBidFromBook(book));
+  return bestAsk;
 }
 
 function getSellLiquidity(book, minPrice) {
@@ -579,10 +601,10 @@ function roundBuyPriceWei(price) {
 }
 
 // 获取订单簿买一价
-async function getBestBid(marketId) {
+async function getBestBid(marketId, market, outcome) {
   try {
     const book = await getPredictBook(marketId);
-    return getBestPredictBidFromBook(book);
+    return getBestPredictBidFromBook(book, market, outcome);
   } catch (e) { 
     console.log("  ⚠️ getBestBid错误: " + e.message);
     return null; 
@@ -720,10 +742,11 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
       return;
     }
 
-    let predictBidPromise = predictBidCache.get(String(marketId));
+    const predictBidCacheKey = String(marketId) + "-" + String(tokenId);
+    let predictBidPromise = predictBidCache.get(predictBidCacheKey);
     if (!predictBidPromise) {
-      predictBidPromise = getBestBid(marketId);
-      predictBidCache.set(String(marketId), predictBidPromise);
+      predictBidPromise = getBestBid(marketId, market, outcome);
+      predictBidCache.set(predictBidCacheKey, predictBidPromise);
     }
 
     const [predictBid, polyQuote] = await Promise.all([
@@ -820,9 +843,6 @@ async function processMarket(market, amountWei, existingOrders) {
     return { new: 0, skip: 0 };
   }
 
-  const predictBid = getBestPredictBidFromBook(predictBook);
-  const predictAsk = getBestPredictAskFromBook(predictBook);
-
   let newOrders = 0;
   let skipOrders = 0;
 
@@ -847,6 +867,9 @@ async function processMarket(market, amountWei, existingOrders) {
       skipOrders++;
       continue;
     }
+
+    const predictBid = getBestPredictBidFromBook(predictBook, market, outcome);
+    const predictAsk = getBestPredictAskFromBook(predictBook, market, outcome);
 
     const price = predictBid ? Math.max(Number(predictBid), polyQuote.price) : polyQuote.price;
     if (price < MIN_BUY_PRICE || price > 0.99) {
