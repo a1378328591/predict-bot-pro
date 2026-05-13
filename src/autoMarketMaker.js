@@ -37,6 +37,7 @@ const MIN_BUY_PRICE = 0.25; // 低于25不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
+const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
 
@@ -673,6 +674,12 @@ async function closeSinglePosition(pos, openOrders) {
     const outcome = market?.outcomes?.find(item => String(item.onChainId) === String(tokenId)) ?? pos.outcome;
     const liquidity = getOutcomeSellLiquidity(book, market, outcome, minSellPrice);
     const quantity = Number(quantityWei) / 1e18;
+    const orderValueUsd = quantity * minSellPrice;
+
+    if (orderValueUsd < MIN_ORDER_VALUE_USD) {
+      console.log("⚠️ 小额持仓低于最小下单金额，跳过平仓 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " minSell=" + minSellPrice.toFixed(3) + " value=" + orderValueUsd.toFixed(4) + " minValue=" + MIN_ORDER_VALUE_USD);
+      return;
+    }
 
     if (!liquidity.bestPrice || liquidity.size < quantity) {
       console.log("⚠️ 平仓流动性不足 marketId=" + marketId + " need=" + quantity.toFixed(4) + " have=" + liquidity.size.toFixed(4) + " min=" + minSellPrice.toFixed(3));
