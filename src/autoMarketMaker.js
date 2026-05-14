@@ -537,6 +537,58 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei) {
   return (await res.json()).data;
 }
 
+async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
+  const builder = await initSDK();
+
+  const { pricePerShare, makerAmount, takerAmount, slippageBps } = builder.getMarketOrderAmounts({
+    side: Side.SELL,
+    quantityWei,
+  }, book);
+
+  const order = builder.buildOrder("MARKET", {
+    side: Side.SELL,
+    tokenId,
+    makerAmount,
+    takerAmount,
+    nonce: 0n,
+    feeRateBps: market?.feeRateBps || 0,
+  });
+
+  const typedData = builder.buildTypedData(order, {
+    isNegRisk: market?.isNegRisk || false,
+    isYieldBearing: market?.isYieldBearing || false,
+  });
+
+  const signedOrder = await builder.signTypedDataOrder(typedData);
+  const hash = builder.buildTypedDataHash(typedData);
+
+  const payload = {
+    data: {
+      order: { ...signedOrder, hash },
+      pricePerShare,
+      strategy: "MARKET",
+      slippageBps,
+    }
+  };
+  const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
+
+  const res = await fetch("https://api.predict.fun/v1/orders", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": PREDICT_API_KEY,
+      "Authorization": "Bearer " + await getJwtTokenWithSDK(),
+    },
+    body,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text.slice(0, 100));
+  }
+  return (await res.json()).data;
+}
+
 async function getPredictBook(marketId) {
   const url = "https://api.predict.fun/v1/markets/" + marketId + "/orderbook";
   const res = await fetch(url, { headers: { "x-api-key": PREDICT_API_KEY } });
@@ -604,6 +656,20 @@ function getOutcomeSellLiquidity(book, market, outcome, minPrice) {
   }
 
   return getSellLiquidity(book, minPrice);
+}
+
+function getOutcomeMarketBook(book, market, outcome) {
+  const position = getOutcomePosition(market, outcome);
+  if (position !== 1 || market?.outcomes?.length !== 2) return book;
+
+  const bids = Array.isArray(book?.asks)
+    ? book.asks.map(parseDepthLevel).filter(Boolean).map(ask => [invertBinaryPrice(ask.price), ask.size]).filter(([price]) => price !== null).sort((a, b) => b[0] - a[0])
+    : [];
+  const asks = Array.isArray(book?.bids)
+    ? book.bids.map(parseDepthLevel).filter(Boolean).map(bid => [invertBinaryPrice(bid.price), bid.size]).filter(([price]) => price !== null).sort((a, b) => a[0] - b[0])
+    : [];
+
+  return { ...book, bids, asks };
 }
 
 function roundSellPriceWei(price) {
@@ -676,13 +742,15 @@ async function closeSinglePosition(pos, openOrders) {
     const quantity = Number(quantityWei) / 1e18;
     const orderValueUsd = quantity * minSellPrice;
 
-    if (orderValueUsd < MIN_ORDER_VALUE_USD) {
-      console.log("⚠️ 小额持仓低于最小下单金额，跳过平仓 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " minSell=" + minSellPrice.toFixed(3) + " value=" + orderValueUsd.toFixed(4) + " minValue=" + MIN_ORDER_VALUE_USD);
+    if (!liquidity.bestPrice || liquidity.size < quantity) {
+      console.log("⚠️ 平仓流动性不足 marketId=" + marketId + " need=" + quantity.toFixed(4) + " have=" + liquidity.size.toFixed(4) + " min=" + minSellPrice.toFixed(3));
       return;
     }
 
-    if (!liquidity.bestPrice || liquidity.size < quantity) {
-      console.log("⚠️ 平仓流动性不足 marketId=" + marketId + " need=" + quantity.toFixed(4) + " have=" + liquidity.size.toFixed(4) + " min=" + minSellPrice.toFixed(3));
+    if (orderValueUsd < MIN_ORDER_VALUE_USD) {
+      const marketBook = getOutcomeMarketBook(book, market, outcome);
+      console.log("📤 小额持仓市价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " minSell=" + minSellPrice.toFixed(3) + " value=" + orderValueUsd.toFixed(4) + " minValue=" + MIN_ORDER_VALUE_USD + " bestBid=" + liquidity.bestPrice);
+      await placeSellMarketSmall(market, tokenId, quantityWei, marketBook);
       return;
     }
 
