@@ -57,8 +57,6 @@ const VOLATILE_MARKET_KEYWORDS = [
   "crypto",
   "cryptocurrency",
 ];
-const PRICE_TARGET_WORDS = ["hit"];
-const PRICE_TARGET_SYMBOLS = ["$", "￥", "¥", "＄"];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
   "politic",
@@ -147,10 +145,6 @@ function hasKeyword(text, keyword) {
   return new RegExp("(^|[^a-z0-9])" + keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z0-9]|$)").test(text);
 }
 
-function hasPriceTargetPattern(text) {
-  return PRICE_TARGET_WORDS.some(word => hasKeyword(text, word)) && PRICE_TARGET_SYMBOLS.some(symbol => text.includes(symbol));
-}
-
 function hasCompanyRankingPattern(text) {
   return COMPANY_RANKING_KEYWORDS.some(keyword => text.includes(keyword));
 }
@@ -167,7 +161,9 @@ function getBlockedMarketReason(market) {
   if (hasCompanyRankingPattern(text)) return "公司/市值排名市场";
   const politicalKeyword = getPoliticalKeyword(text);
   if (politicalKeyword) return "政治/地缘政治关键词: " + politicalKeyword;
-  if (hasPriceTargetPattern(text)) return "波动市场价格目标: hit + 货币符号";
+  if (hasKeyword(text, "hit") || hasKeyword(text, "launch") || hasKeyword(text, "token") || text.includes("$") || text.includes("￥") || text.includes("¥") || text.includes("＄")) {
+    return "波动市场关键词: hit/launch/token/货币符号";
+  }
   const keyword = VOLATILE_MARKET_KEYWORDS.find(word => hasKeyword(text, word));
   if (!keyword) return null;
   return "波动市场关键词: " + keyword;
