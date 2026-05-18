@@ -30,6 +30,7 @@ const ORDER_RATIO = 0.95; // 使用余额的95%
 const CHECK_INTERVAL_MS = 5 * 60_000; // 5分钟执行一轮挂单
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
+const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
 const MARKET_DELAY_MS = 1_000; // 每个市场之间等待1秒
 const OUTCOME_DELAY_MS = 500; // 同一市场每个outcome之间等待500ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
@@ -39,6 +40,7 @@ const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
 const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
+const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
 
 // SDK 初始化
@@ -51,12 +53,15 @@ const trackedOrders = new Map();
 const cancelingOrders = new Set();
 const blockedMarkets = loadBlockedMarkets();
 const latestMarketsById = new Map();
+const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let monitorRunning = false;
 let positionMonitorRunning = false;
+let startTimeRefreshRunning = false;
 const closingPositions = new Set();
 let monitorLoopCount = 0;
 let positionMonitorLoopCount = 0;
+let startTimeRefreshLoopCount = 0;
 
 function loadBlockedMarkets() {
   try {
@@ -89,6 +94,12 @@ function parseArray(value) {
   }
 }
 
+function parseDateValue(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function normalizeName(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -111,6 +122,14 @@ function getOrderSide(order) {
 
 function logCancelCondition(condition, details) {
   console.log("📌 命中撤单条件:", condition, details || "");
+}
+
+function getFirstValidDate(values) {
+  for (const value of values) {
+    const date = parseDateValue(value);
+    if (date) return date;
+  }
+  return null;
 }
 
 function parseOrderPrice(value) {
@@ -270,8 +289,11 @@ async function getMarkets() {
   }
 }
 
-async function getPolymarketMarket(conditionId) {
-  if (polyMarketCache.has(conditionId)) return polyMarketCache.get(conditionId);
+async function getPolymarketMarket(conditionId, options = {}) {
+  const cached = polyMarketCache.get(conditionId);
+  if (!options.forceRefresh && cached && Date.now() - cached.fetchedAt < POLY_MARKET_CACHE_TTL_MS) {
+    return cached.market;
+  }
 
   const urls = [
     "https://gamma-api.polymarket.com/markets?condition_ids=" + encodeURIComponent(conditionId),
@@ -286,13 +308,13 @@ async function getPolymarketMarket(conditionId) {
       const items = Array.isArray(json) ? json : json.data;
       const market = items?.find(m => normalizeName(m.conditionId ?? m.condition_id) === normalizeName(conditionId)) ?? items?.[0];
       if (market) {
-        polyMarketCache.set(conditionId, market);
+        polyMarketCache.set(conditionId, { market, fetchedAt: Date.now() });
         return market;
       }
     } catch (e) {}
   }
 
-  polyMarketCache.set(conditionId, null);
+  polyMarketCache.set(conditionId, { market: null, fetchedAt: Date.now() });
   return null;
 }
 
@@ -308,10 +330,48 @@ async function getPolymarketBook(tokenId) {
 }
 
 function getPolymarketStartAt(polyMarket) {
-  const raw = polyMarket?.gameStartTime ?? polyMarket?.eventStartTime ?? polyMarket?.startDate ?? polyMarket?.startDateIso ?? polyMarket?.endDate ?? polyMarket?.events?.[0]?.startDate;
-  if (!raw) return null;
-  const date = new Date(raw);
-  return Number.isNaN(date.getTime()) ? null : date;
+  return getFirstValidDate([
+    polyMarket?.gameStartTime,
+    polyMarket?.eventStartTime,
+    polyMarket?.startTime,
+    polyMarket?.events?.[0]?.startTime,
+    polyMarket?.events?.[0]?.eventDate,
+  ]);
+}
+
+function getPredictStartAt(market) {
+  return getFirstValidDate([
+    market?.gameStartTime,
+    market?.eventStartTime,
+    market?.startTime,
+    market?.events?.[0]?.startTime,
+    market?.events?.[0]?.eventDate,
+  ]);
+}
+
+function getKnownMarketStartInfo(market) {
+  const candidates = [];
+  const cached = latestStartTimesByMarketId.get(String(market?.id));
+  if (cached?.startsAt) candidates.push(cached);
+
+  const predictStartsAt = getPredictStartAt(market);
+  if (predictStartsAt) candidates.push({ startsAt: predictStartsAt, source: "Predict" });
+
+  return candidates.sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime())[0] ?? null;
+}
+
+function rememberMarketStart(marketId, startsAt, source, conditionId) {
+  if (!marketId || !startsAt) return;
+  const key = String(marketId);
+  const current = latestStartTimesByMarketId.get(key);
+  if (current && current.startsAt.getTime() <= startsAt.getTime()) return;
+  latestStartTimesByMarketId.set(key, { startsAt, source, conditionId, updatedAt: new Date() });
+}
+
+function getMarketStartedReason(market) {
+  const info = getKnownMarketStartInfo(market);
+  if (!info || info.startsAt.getTime() > Date.now()) return null;
+  return "已开赛 source=" + info.source + " startsAt=" + info.startsAt.toISOString();
 }
 
 function isSportsLikeMarket(market) {
@@ -353,6 +413,7 @@ async function getPolymarketQuote(market, outcome) {
     if (!polyMarket) continue;
 
     const startsAt = getPolymarketStartAt(polyMarket);
+    rememberMarketStart(market.id, startsAt, "Polymarket", conditionId);
     if (isSportsLikeMarket(market) && !startsAt) {
       return { ok: false, reason: "运动/电竞市场缺少开赛时间" };
     }
@@ -814,6 +875,14 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     const marketTitle = market?.question || market?.title || order?.market?.question || order?.market?.title || "";
     const orderSide = getOrderSide(order);
     const orderPrice = getOrderPrice(order);
+
+    const startedReason = getMarketStartedReason(market);
+    if (startedReason) {
+      logCancelCondition("getMarketStartedReason(market)", "marketId=" + marketId + " " + startedReason + " title=" + marketTitle);
+      await cancelOrder(orderId, startedReason + " marketId=" + marketId + " title=" + marketTitle);
+      return;
+    }
+
     if (blockedMarkets.has(String(marketId))) {
       logCancelCondition("blockedMarkets.has(String(marketId))", "marketId=" + marketId + " title=" + marketTitle);
       await cancelOrder(orderId, "市场在黑名单 marketId=" + marketId + " title=" + marketTitle);
@@ -913,9 +982,59 @@ async function monitorLoop() {
   }
 }
 
+async function refreshStartTimes() {
+  const markets = [...latestMarketsById.values()];
+  if (!markets.length) return;
+
+  let refreshed = 0;
+  for (const market of markets) {
+    const predictStartsAt = getPredictStartAt(market);
+    rememberMarketStart(market.id, predictStartsAt, "Predict");
+
+    for (const conditionId of market.polymarketConditionIds || []) {
+      const polyMarket = await getPolymarketMarket(conditionId, { forceRefresh: true });
+      const polyStartsAt = getPolymarketStartAt(polyMarket);
+      rememberMarketStart(market.id, polyStartsAt, "Polymarket", conditionId);
+      if (polyStartsAt) refreshed++;
+    }
+
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  startTimeRefreshLoopCount++;
+  if (startTimeRefreshLoopCount % 5 === 1) {
+    console.log("⏱️ 开赛时间刷新 markets=" + markets.length + " pmStarts=" + refreshed + " known=" + latestStartTimesByMarketId.size);
+  }
+}
+
+async function startTimeRefreshLoop() {
+  while (true) {
+    if (startTimeRefreshRunning) {
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
+
+    startTimeRefreshRunning = true;
+    try {
+      if (latestMarketsById.size === 0) await getMarkets();
+      await refreshStartTimes();
+    } catch (e) {
+      console.log("⚠️ 开赛时间刷新异常:", e.message);
+    } finally {
+      startTimeRefreshRunning = false;
+    }
+
+    await new Promise(r => setTimeout(r, START_TIME_REFRESH_INTERVAL_MS));
+  }
+}
+
 // 处理单个市场 - 独立错误处理
 async function processMarket(market, amountWei, existingOrders) {
   if (blockedMarkets.has(String(market.id))) {
+    return { new: 0, skip: 1 };
+  }
+
+  if (getMarketStartedReason(market)) {
     return { new: 0, skip: 1 };
   }
 
@@ -1011,6 +1130,7 @@ async function main() {
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
   positionMonitorLoop().catch(e => console.error("💥 持仓监控停止:", e));
+  startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
   while (true) {
     try {
