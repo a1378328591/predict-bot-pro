@@ -40,6 +40,7 @@ const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
 const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
+const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
 const VOLATILE_MARKET_KEYWORDS = [
@@ -79,6 +80,18 @@ const POLITICAL_MARKET_KEYWORDS = [
   "taiwan",
   "pahlavi",
 ];
+const MACRO_POLICY_KEYWORDS = [
+  "fed rate",
+  "interest rate",
+  "rate hike",
+  "rate cut",
+  "fed funds",
+  "fomc",
+  "powell",
+  "inflation",
+  "cpi",
+  "central bank",
+];
 
 // SDK 初始化
 let orderBuilder = null;
@@ -90,6 +103,8 @@ const trackedOrders = new Map();
 const cancelingOrders = new Set();
 const blockedMarkets = loadBlockedMarkets();
 const latestMarketsById = new Map();
+let latestActiveRewardMarketIds = new Set();
+let latestActiveRewardMarketsFetchedAt = 0;
 const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let monitorRunning = false;
@@ -153,6 +168,10 @@ function getPoliticalKeyword(text) {
   return POLITICAL_MARKET_KEYWORDS.find(keyword => hasKeyword(text, keyword));
 }
 
+function getMacroPolicyKeyword(text) {
+  return MACRO_POLICY_KEYWORDS.find(keyword => text.includes(keyword));
+}
+
 function getBlockedMarketReason(market) {
   const text = [market?.categorySlug, market?.marketVariant, market?.title, market?.question]
     .filter(Boolean)
@@ -161,6 +180,8 @@ function getBlockedMarketReason(market) {
   if (hasCompanyRankingPattern(text)) return "公司/市值排名市场";
   const politicalKeyword = getPoliticalKeyword(text);
   if (politicalKeyword) return "政治/地缘政治关键词: " + politicalKeyword;
+  const macroKeyword = getMacroPolicyKeyword(text);
+  if (macroKeyword) return "宏观利率/央行关键词: " + macroKeyword;
   if (hasKeyword(text, "hit") || hasKeyword(text, "launch") || hasKeyword(text, "token") || text.includes("$") || text.includes("￥") || text.includes("¥") || text.includes("＄")) {
     return "波动市场关键词: hit/launch/token/货币符号";
   }
@@ -195,6 +216,10 @@ function getFirstValidDate(values) {
     if (date) return date;
   }
   return null;
+}
+
+function getEarliestDate(values) {
+  return values.filter(Boolean).sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
 }
 
 function parseOrderPrice(value) {
@@ -318,6 +343,7 @@ async function getBalance() {
 async function getMarkets() {
   try {
     const markets = [];
+    const activeRewardMarketIds = new Set();
     let after = null;
 
     while (true) {
@@ -336,6 +362,7 @@ async function getMarkets() {
       const pageMarkets = json.data || [];
 
       for (const market of pageMarkets) {
+        activeRewardMarketIds.add(String(market.id));
         if (!getBlockedMarketReason(market) && market.polymarketConditionIds?.length) {
           markets.push(market);
         }
@@ -345,6 +372,8 @@ async function getMarkets() {
       after = json.cursor;
     }
 
+    latestActiveRewardMarketIds = activeRewardMarketIds;
+    latestActiveRewardMarketsFetchedAt = Date.now();
     for (const market of markets) latestMarketsById.set(String(market.id), market);
     return markets;
   } catch (e) {
@@ -411,6 +440,25 @@ function getPredictStartAt(market) {
     market?.events?.[0]?.startTime,
     market?.events?.[0]?.eventDate,
   ]);
+}
+
+function getRewardEndsAt(market) {
+  return getFirstValidDate([
+    market?.rewards?.current?.endsAt,
+    market?.boostEndsAt,
+  ]);
+}
+
+function getRewardCancelAt(market) {
+  const rewardEndsAt = getRewardEndsAt(market);
+  return rewardEndsAt ? new Date(rewardEndsAt.getTime() - EXPIRE_BEFORE_REWARD_END_MS) : null;
+}
+
+function getRewardEndingReason(market) {
+  const rewardEndsAt = getRewardEndsAt(market);
+  const cancelAt = getRewardCancelAt(market);
+  if (!rewardEndsAt || !cancelAt || cancelAt.getTime() > Date.now()) return null;
+  return "积分即将结束 endsAt=" + rewardEndsAt.toISOString() + " cancelAt=" + cancelAt.toISOString();
 }
 
 function getKnownMarketStartInfo(market) {
@@ -482,10 +530,17 @@ async function getPolymarketQuote(market, outcome) {
       return { ok: false, reason: "运动/电竞市场缺少开赛时间" };
     }
 
-    const expiresAt = startsAt ? new Date(startsAt.getTime() - EXPIRE_BEFORE_START_MS) : null;
-    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+    const startExpiresAt = startsAt ? new Date(startsAt.getTime() - EXPIRE_BEFORE_START_MS) : null;
+    if (startExpiresAt && startExpiresAt.getTime() <= Date.now()) {
       return { ok: false, reason: "已接近开赛" };
     }
+
+    const rewardCancelAt = getRewardCancelAt(market);
+    if (rewardCancelAt && rewardCancelAt.getTime() <= Date.now()) {
+      return { ok: false, reason: getRewardEndingReason(market) || "积分即将结束" };
+    }
+
+    const expiresAt = getEarliestDate([startExpiresAt, rewardCancelAt]);
 
     const tokenId = findPolymarketTokenId(polyMarket, outcome);
     if (!tokenId) continue;
@@ -948,6 +1003,19 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
       return;
     }
 
+    if (latestActiveRewardMarketsFetchedAt && !latestActiveRewardMarketIds.has(String(marketId))) {
+      logCancelCondition("!latestActiveRewardMarketIds.has(String(marketId))", "marketId=" + marketId + " title=" + marketTitle);
+      await cancelOrder(orderId, "市场不在活跃积分列表 marketId=" + marketId + " title=" + marketTitle);
+      return;
+    }
+
+    const rewardEndingReason = getRewardEndingReason(market ?? order.market);
+    if (rewardEndingReason) {
+      logCancelCondition("getRewardEndingReason(market)", "marketId=" + marketId + " " + rewardEndingReason + " title=" + marketTitle);
+      await cancelOrder(orderId, rewardEndingReason + " marketId=" + marketId + " title=" + marketTitle);
+      return;
+    }
+
     const startedReason = getMarketStartedReason(market);
     if (startedReason) {
       logCancelCondition("getMarketStartedReason(market)", "marketId=" + marketId + " " + startedReason + " title=" + marketTitle);
@@ -1109,6 +1177,10 @@ async function processMarket(market, amountWei, existingOrders) {
   const blockedReason = getBlockedMarketReason(market);
   if (blockedReason) {
     blockMarket(market.id, blockedReason + " title=" + (market.question || market.title || ""));
+    return { new: 0, skip: 1 };
+  }
+
+  if (getRewardEndingReason(market)) {
     return { new: 0, skip: 1 };
   }
 
