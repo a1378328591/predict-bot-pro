@@ -42,6 +42,45 @@ const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
+const VOLATILE_MARKET_KEYWORDS = [
+  "bitcoin",
+  "btc",
+  "ethereum",
+  "eth",
+  "solana",
+  "sol",
+  "xrp",
+  "doge",
+  "dogecoin",
+  "litecoin",
+  "ltc",
+  "crypto",
+  "cryptocurrency",
+];
+const PRICE_TARGET_WORDS = ["hit"];
+const PRICE_TARGET_SYMBOLS = ["$", "￥", "¥", "＄"];
+const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
+const POLITICAL_MARKET_KEYWORDS = [
+  "politic",
+  "election",
+  "president",
+  "prime minister",
+  "government",
+  "parliament",
+  "congress",
+  "senate",
+  "supreme court",
+  "trump",
+  "biden",
+  "iran",
+  "israel",
+  "gaza",
+  "ukraine",
+  "russia",
+  "china",
+  "taiwan",
+  "pahlavi",
+];
 
 // SDK 初始化
 let orderBuilder = null;
@@ -102,6 +141,36 @@ function parseDateValue(value) {
 
 function normalizeName(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function hasKeyword(text, keyword) {
+  return new RegExp("(^|[^a-z0-9])" + keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z0-9]|$)").test(text);
+}
+
+function hasPriceTargetPattern(text) {
+  return PRICE_TARGET_WORDS.some(word => hasKeyword(text, word)) && PRICE_TARGET_SYMBOLS.some(symbol => text.includes(symbol));
+}
+
+function hasCompanyRankingPattern(text) {
+  return COMPANY_RANKING_KEYWORDS.some(keyword => text.includes(keyword));
+}
+
+function getPoliticalKeyword(text) {
+  return POLITICAL_MARKET_KEYWORDS.find(keyword => hasKeyword(text, keyword));
+}
+
+function getBlockedMarketReason(market) {
+  const text = [market?.categorySlug, market?.marketVariant, market?.title, market?.question]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (hasCompanyRankingPattern(text)) return "公司/市值排名市场";
+  const politicalKeyword = getPoliticalKeyword(text);
+  if (politicalKeyword) return "政治/地缘政治关键词: " + politicalKeyword;
+  if (hasPriceTargetPattern(text)) return "波动市场价格目标: hit + 货币符号";
+  const keyword = VOLATILE_MARKET_KEYWORDS.find(word => hasKeyword(text, word));
+  if (!keyword) return null;
+  return "波动市场关键词: " + keyword;
 }
 
 function getOrderId(order) {
@@ -249,7 +318,7 @@ async function getBalance() {
   return 0n;
 }
 
-// 获取全部活跃市场（按成交量排序，过滤BTC）
+// 获取全部活跃市场（按成交量排序，过滤波动市场）
 async function getMarkets() {
   try {
     const markets = [];
@@ -271,8 +340,7 @@ async function getMarkets() {
       const pageMarkets = json.data || [];
 
       for (const market of pageMarkets) {
-        const title = (market.title || "").toLowerCase();
-        if (!title.includes("btc") && !title.includes("bitcoin") && market.polymarketConditionIds?.length) {
+        if (!getBlockedMarketReason(market) && market.polymarketConditionIds?.length) {
           markets.push(market);
         }
       }
@@ -876,6 +944,14 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     const orderSide = getOrderSide(order);
     const orderPrice = getOrderPrice(order);
 
+    const blockedReason = getBlockedMarketReason(market ?? order.market);
+    if (blockedReason) {
+      blockMarket(marketId, blockedReason + " title=" + marketTitle);
+      logCancelCondition("getBlockedMarketReason(market)", "marketId=" + marketId + " reason=" + blockedReason + " title=" + marketTitle);
+      await cancelOrder(orderId, blockedReason + " marketId=" + marketId + " title=" + marketTitle);
+      return;
+    }
+
     const startedReason = getMarketStartedReason(market);
     if (startedReason) {
       logCancelCondition("getMarketStartedReason(market)", "marketId=" + marketId + " " + startedReason + " title=" + marketTitle);
@@ -1031,6 +1107,12 @@ async function startTimeRefreshLoop() {
 // 处理单个市场 - 独立错误处理
 async function processMarket(market, amountWei, existingOrders) {
   if (blockedMarkets.has(String(market.id))) {
+    return { new: 0, skip: 1 };
+  }
+
+  const blockedReason = getBlockedMarketReason(market);
+  if (blockedReason) {
+    blockMarket(market.id, blockedReason + " title=" + (market.question || market.title || ""));
     return { new: 0, skip: 1 };
   }
 
