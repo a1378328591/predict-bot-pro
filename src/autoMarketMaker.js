@@ -28,6 +28,7 @@ console.error = (...args) => {
 // ======== 配置 ========
 const ORDER_RATIO = 0.95; // 使用余额的95%
 const CHECK_INTERVAL_MS = 5 * 60_000; // 5分钟执行一轮挂单
+const HOURLY_CANCEL_INTERVAL_MS = 60 * 60_000; // 每小时撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
@@ -109,10 +110,12 @@ let latestActiveRewardMarketsFetchedAt = 0;
 const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let monitorRunning = false;
+let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
 const closingPositions = new Set();
 let monitorLoopCount = 0;
+let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
 let startTimeRefreshLoopCount = 0;
 
@@ -608,6 +611,33 @@ async function cancelOrder(orderId, reason) {
   } catch (e) {
     cancelingOrders.delete(key);
     console.log("⚠️ 撤单失败:", orderId, reason || "", e.message);
+  }
+}
+
+async function cancelOrders(orderIds, reason) {
+  const ids = [...new Set(orderIds.filter(Boolean).map(String))]
+    .filter(id => !cancelingOrders.has(id));
+  if (!ids.length) return 0;
+
+  for (const id of ids) cancelingOrders.add(id);
+  try {
+    const jwt = await getJwtTokenWithSDK();
+    const res = await fetch("https://api.predict.fun/v1/orders/remove", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": PREDICT_API_KEY,
+        "Authorization": "Bearer " + jwt,
+      },
+      body: JSON.stringify({ data: { ids } }),
+    });
+    if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
+    console.log("🧯 批量已撤单:", ids.length, reason || "");
+    return ids.length;
+  } catch (e) {
+    for (const id of ids) cancelingOrders.delete(id);
+    console.log("⚠️ 批量撤单失败:", ids.length, reason || "", e.message);
+    return 0;
   }
 }
 
@@ -1123,6 +1153,30 @@ async function monitorLoop() {
   }
 }
 
+async function hourlyCancelLoop() {
+  while (true) {
+    await new Promise(r => setTimeout(r, HOURLY_CANCEL_INTERVAL_MS));
+
+    if (hourlyCancelRunning) {
+      console.log("⏭️ 小时撤单仍在运行，跳过本轮");
+      continue;
+    }
+
+    hourlyCancelRunning = true;
+    try {
+      const openOrders = await getOpenOrders(true);
+      const orderIds = openOrders.map(getOrderId).filter(Boolean);
+      hourlyCancelLoopCount++;
+      console.log("🕐 小时撤单运行中 openOrders=" + openOrders.length + " ids=" + orderIds.length + " round=" + hourlyCancelLoopCount);
+      await cancelOrders(orderIds, "每小时刷新挂单，避免长期排队");
+    } catch (e) {
+      console.log("⚠️ 小时撤单异常:", e.message);
+    } finally {
+      hourlyCancelRunning = false;
+    }
+  }
+}
+
 async function refreshStartTimes() {
   const markets = [...latestMarketsById.values()];
   if (!markets.length) return;
@@ -1280,6 +1334,7 @@ async function main() {
   console.log("📊 全部开放市场 | 💰 " + (ORDER_RATIO*100) + "%余额 | ⏰ 5m | 🚫过滤BTC");
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
+  hourlyCancelLoop().catch(e => console.error("💥 小时撤单停止:", e));
   positionMonitorLoop().catch(e => console.error("💥 持仓监控停止:", e));
   startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
