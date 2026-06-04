@@ -571,11 +571,28 @@ async function getPolymarketQuote(market, outcome) {
 async function getOpenOrders(throwOnError = false) {
   try {
     const jwt = await getJwtTokenWithSDK();
-    const res = await fetch("https://api.predict.fun/v1/orders?status=OPEN&first=200", {
-      headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
-    });
-    if (!res.ok) throw new Error("orders status " + res.status);
-    const orders = (await res.json()).data || [];
+    const orders = [];
+    let after = null;
+    const seenCursors = new Set();
+
+    while (true) {
+      const query = new URLSearchParams({ status: "OPEN", first: "200" });
+      if (after) query.set("after", after);
+
+      const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+        headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+      });
+      if (!res.ok) throw new Error("orders status " + res.status);
+      const json = await res.json();
+      const pageOrders = json.data || [];
+      orders.push(...pageOrders);
+
+      if (!json.cursor || pageOrders.length === 0) break;
+      if (seenCursors.has(json.cursor)) break;
+      seenCursors.add(json.cursor);
+      after = json.cursor;
+    }
+
     latestOpenOrders = orders;
     latestOpenOrdersFetchedAt = Date.now();
     return orders;
@@ -1025,7 +1042,13 @@ async function positionMonitorLoop() {
 function detectFilledTrackedOrders(openOrders, openOrdersFetchedAt = 0) {
   const openIds = new Set(openOrders.map(getOrderId).filter(Boolean).map(String));
   for (const [orderId, info] of trackedOrders.entries()) {
-    if (openIds.has(orderId)) continue;
+    if (openIds.has(orderId)) {
+      if (info.missingCount) {
+        info.missingCount = 0;
+        console.log("🧭 跟踪挂单重新出现在OPEN orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId);
+      }
+      continue;
+    }
 
     if (info.createdAt && openOrdersFetchedAt && info.createdAt >= openOrdersFetchedAt) {
       console.log("🧭 跳过成交检测: tracked订单比OPEN快照新 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " trackedAt=" + info.createdAt + " openFetchedAt=" + openOrdersFetchedAt);
@@ -1038,6 +1061,13 @@ function detectFilledTrackedOrders(openOrders, openOrdersFetchedAt = 0) {
       cancelingOrders.delete(orderId);
       continue;
     }
+
+    info.missingCount = (info.missingCount || 0) + 1;
+    if (info.missingCount < 2) {
+      console.log("🧭 跟踪挂单首次不在OPEN，等待下轮确认 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " openOrders=" + openOrders.length + " openFetchedAt=" + openOrdersFetchedAt);
+      continue;
+    }
+
     console.log("🔎 跟踪挂单不在OPEN，按成交处理 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " ageMs=" + (Date.now() - (info.createdAt || Date.now())) + " openOrders=" + openOrders.length + " openFetchedAt=" + openOrdersFetchedAt);
     blockMarket(info.marketId, "已跟踪挂单不再开放，按成交处理");
   }
