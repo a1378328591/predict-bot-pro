@@ -109,6 +109,7 @@ let latestActiveRewardMarketIds = new Set();
 let latestActiveRewardMarketsFetchedAt = 0;
 const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
+let latestOpenOrdersFetchedAt = 0;
 let monitorRunning = false;
 let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
@@ -576,6 +577,7 @@ async function getOpenOrders(throwOnError = false) {
     if (!res.ok) throw new Error("orders status " + res.status);
     const orders = (await res.json()).data || [];
     latestOpenOrders = orders;
+    latestOpenOrdersFetchedAt = Date.now();
     return orders;
   } catch (e) {
     if (throwOnError) throw e;
@@ -923,7 +925,11 @@ async function rememberFilledMarkets() {
     const positions = await getPositions();
     for (const pos of positions) {
       const bal = BigInt(pos.balance || 0);
-      if (bal > 0n) blockMarket(pos.market?.id ?? pos.marketId, "检测到持仓，疑似被塞订单");
+      if (bal > 0n) {
+        const marketId = pos.market?.id ?? pos.marketId;
+        console.log("🔎 检测到持仓准备拉黑 marketId=" + marketId + " tokenId=" + getPositionTokenId(pos) + " balance=" + bal.toString());
+        blockMarket(marketId, "检测到持仓，疑似被塞订单");
+      }
     }
   } catch (e) {}
 }
@@ -946,6 +952,7 @@ async function closeSinglePosition(pos, openOrders) {
 
   try {
     closingPositions.add(closeKey);
+    console.log("🔎 平仓监控检测到持仓准备拉黑 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
     blockMarket(marketId, "检测到持仓，停止该市场后续挂买单");
 
     if (hasOpenSellOrder(openOrders, marketId, tokenId)) {
@@ -1015,15 +1022,23 @@ async function positionMonitorLoop() {
   }
 }
 
-function detectFilledTrackedOrders(openOrders) {
+function detectFilledTrackedOrders(openOrders, openOrdersFetchedAt = 0) {
   const openIds = new Set(openOrders.map(getOrderId).filter(Boolean).map(String));
   for (const [orderId, info] of trackedOrders.entries()) {
     if (openIds.has(orderId)) continue;
+
+    if (info.createdAt && openOrdersFetchedAt && info.createdAt >= openOrdersFetchedAt) {
+      console.log("🧭 跳过成交检测: tracked订单比OPEN快照新 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " trackedAt=" + info.createdAt + " openFetchedAt=" + openOrdersFetchedAt);
+      continue;
+    }
+
     trackedOrders.delete(orderId);
     if (cancelingOrders.has(orderId)) {
+      console.log("🧭 跟踪挂单消失但属于主动撤单 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId);
       cancelingOrders.delete(orderId);
       continue;
     }
+    console.log("🔎 跟踪挂单不在OPEN，按成交处理 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " ageMs=" + (Date.now() - (info.createdAt || Date.now())) + " openOrders=" + openOrders.length + " openFetchedAt=" + openOrdersFetchedAt);
     blockMarket(info.marketId, "已跟踪挂单不再开放，按成交处理");
   }
 }
@@ -1124,9 +1139,9 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
   }
 }
 
-async function monitorOpenOrders(openOrders) {
+async function monitorOpenOrders(openOrders, openOrdersFetchedAt = 0) {
   try {
-    detectFilledTrackedOrders(openOrders);
+    detectFilledTrackedOrders(openOrders, openOrdersFetchedAt);
     const predictBidCache = new Map();
     await Promise.allSettled(openOrders.map(order => monitorSingleOrder(order, openOrders, predictBidCache)));
   } catch (e) {
@@ -1151,12 +1166,13 @@ async function monitorLoop() {
         console.log("⚠️ 获取挂单失败，使用上一轮缓存尝试撤单:", e.message);
         openOrders = latestOpenOrders;
       }
+      const openOrdersFetchedAt = latestOpenOrdersFetchedAt;
       await rememberFilledMarkets();
       monitorLoopCount++;
       if (monitorLoopCount % 10 === 1) {
         console.log("🛰️ 挂单监控运行中 openOrders=" + openOrders.length + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
       }
-      await monitorOpenOrders(openOrders);
+      await monitorOpenOrders(openOrders, openOrdersFetchedAt);
     } catch (e) {
       console.log("⚠️ 高频监控异常:", e.message);
     } finally {
@@ -1326,7 +1342,10 @@ async function processMarket(market, amountWei, existingOrders) {
     try {
       const order = await placeBuyLimit(market, outcome, priceWei, amountWei, polyQuote.expiresAt ?? undefined);
       const orderId = getOrderId(order);
-      if (orderId) trackedOrders.set(String(orderId), { marketId: market.id, tokenId });
+      if (orderId) {
+        trackedOrders.set(String(orderId), { marketId: market.id, tokenId, createdAt: Date.now() });
+        console.log("🧾 跟踪新挂单 orderId=" + orderId + " marketId=" + market.id + " tokenId=" + tokenId + " outcome=" + outcome.name);
+      }
       newOrders++;
       console.log("  ✅ 挂单成功 marketId=" + market.id + " outcome=" + outcome.name + " price=" + price);
     } catch (e) {
