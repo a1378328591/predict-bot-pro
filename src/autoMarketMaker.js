@@ -214,6 +214,10 @@ function logCancelCondition(condition, details) {
   console.log("📌 命中撤单条件:", condition, details || "");
 }
 
+function logElapsed(action, startedAt, details) {
+  console.log("⏱️ " + action + "耗时:", (Date.now() - startedAt) + "ms", details || "");
+}
+
 function getFirstValidDate(values) {
   for (const value of values) {
     const date = parseDateValue(value);
@@ -597,6 +601,7 @@ async function cancelOrder(orderId, reason) {
   cancelingOrders.add(key);
   try {
     const jwt = await getJwtTokenWithSDK();
+    const startedAt = Date.now();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
       headers: {
@@ -606,6 +611,7 @@ async function cancelOrder(orderId, reason) {
       },
       body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
+    logElapsed("撤单请求", startedAt, "orderId=" + orderId + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 已撤单:", orderId, reason || "");
   } catch (e) {
@@ -622,6 +628,7 @@ async function cancelOrders(orderIds, reason) {
   for (const id of ids) cancelingOrders.add(id);
   try {
     const jwt = await getJwtTokenWithSDK();
+    const startedAt = Date.now();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
       headers: {
@@ -631,6 +638,7 @@ async function cancelOrders(orderIds, reason) {
       },
       body: JSON.stringify({ data: { ids } }),
     });
+    logElapsed("批量撤单请求", startedAt, "count=" + ids.length + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 批量已撤单:", ids.length, reason || "");
     return ids.length;
@@ -679,6 +687,7 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
+  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -688,6 +697,7 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
     },
     body,
   });
+  logElapsed("挂买单请求", startedAt, "marketId=" + market.id + " tokenId=" + outcome.onChainId + " status=" + res.status);
 
   if (!res.ok) {
     const text = await res.text();
@@ -731,6 +741,7 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei) {
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
+  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -740,6 +751,7 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei) {
     },
     body,
   });
+  logElapsed("挂卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
 
   if (!res.ok) {
     const text = await res.text();
@@ -783,6 +795,7 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
+  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -792,6 +805,7 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
     },
     body,
   });
+  logElapsed("市价卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
 
   if (!res.ok) {
     const text = await res.text();
