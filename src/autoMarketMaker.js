@@ -38,6 +38,7 @@ const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
 const MIN_BUY_PRICE = 0.25; // 低于25不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
+const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
 const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
@@ -1400,18 +1401,25 @@ async function processMarket(market, amountWei, existingOrders) {
       continue;
     }
 
-    if (predictAsk && predictAsk <= price + 1e-9) {
+    const priceWei = roundBuyPriceWei(price);
+    if (priceWei <= 0n) {
+      skipOrders++;
+      continue;
+    }
+
+    const buyPrice = Number(priceWei) / 1e18;
+    if (predictAsk && predictAsk <= buyPrice + 1e-9) {
+      skipOrders++;
+      continue;
+    }
+
+    if (predictAsk && predictAsk - buyPrice > MAX_REWARD_SPREAD) {
+      console.log("  ⏭️ 点差超过积分条件 marketId=" + market.id + " outcome=" + outcome.name + " buy=" + buyPrice.toFixed(3) + " ask=" + Number(predictAsk).toFixed(3) + " spread=" + (predictAsk - buyPrice).toFixed(3) + " max=" + MAX_REWARD_SPREAD);
       skipOrders++;
       continue;
     }
 
     if (predictBid && Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
-      skipOrders++;
-      continue;
-    }
-
-    const priceWei = roundBuyPriceWei(price);
-    if (priceWei <= 0n) {
       skipOrders++;
       continue;
     }
