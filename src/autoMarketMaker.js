@@ -26,7 +26,7 @@ console.error = (...args) => {
 };
 
 // ======== 配置 ========
-const ORDER_RATIO = 0.95; // 使用余额的95%
+const ORDER_RATIO = 0.99; // 使用余额的99%
 const CHECK_INTERVAL_MS = 5 * 60_000; // 5分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 60 * 60_000; // 每小时撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
@@ -1022,8 +1022,13 @@ async function positionMonitorLoop() {
     }
 
     positionMonitorRunning = true;
+    const loopStartedAt = Date.now();
+    let positionsCount = 0;
+    let openOrdersCount = 0;
     try {
       const [positions, openOrders] = await Promise.all([getPositions(), getOpenOrders()]);
+      positionsCount = positions.length;
+      openOrdersCount = openOrders.length;
       positionMonitorLoopCount++;
       if (positionMonitorLoopCount % 10 === 1) {
         console.log("🫀 持仓监控运行中 positions=" + positions.length + " openOrders=" + openOrders.length);
@@ -1033,6 +1038,7 @@ async function positionMonitorLoop() {
       console.log("⚠️ 持仓监控异常:", e.message);
     } finally {
       positionMonitorRunning = false;
+      logElapsed("持仓监控结束", loopStartedAt, "positions=" + positionsCount + " openOrders=" + openOrdersCount);
     }
 
     await new Promise(r => setTimeout(r, POSITION_MONITOR_INTERVAL_MS));
@@ -1187,6 +1193,8 @@ async function monitorLoop() {
     }
 
     monitorRunning = true;
+    const loopStartedAt = Date.now();
+    let openOrdersCount = 0;
     try {
       if (latestMarketsById.size === 0) await getMarkets();
       let openOrders;
@@ -1197,6 +1205,7 @@ async function monitorLoop() {
         openOrders = latestOpenOrders;
       }
       const openOrdersFetchedAt = latestOpenOrdersFetchedAt;
+      openOrdersCount = openOrders.length;
       await rememberFilledMarkets();
       monitorLoopCount++;
       if (monitorLoopCount % 10 === 1) {
@@ -1207,6 +1216,7 @@ async function monitorLoop() {
       console.log("⚠️ 高频监控异常:", e.message);
     } finally {
       monitorRunning = false;
+      logElapsed("挂单监控结束", loopStartedAt, "openOrders=" + openOrdersCount + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
     }
 
     await new Promise(r => setTimeout(r, MONITOR_INTERVAL_MS));
@@ -1223,9 +1233,14 @@ async function hourlyCancelLoop() {
     }
 
     hourlyCancelRunning = true;
+    const loopStartedAt = Date.now();
+    let openOrdersCount = 0;
+    let cancelIdsCount = 0;
     try {
       const openOrders = await getOpenOrders(true);
       const orderIds = openOrders.map(getOrderId).filter(Boolean);
+      openOrdersCount = openOrders.length;
+      cancelIdsCount = orderIds.length;
       hourlyCancelLoopCount++;
       console.log("🕐 小时撤单运行中 openOrders=" + openOrders.length + " ids=" + orderIds.length + " round=" + hourlyCancelLoopCount);
       await cancelOrders(orderIds, "每小时刷新挂单，避免长期排队");
@@ -1233,13 +1248,14 @@ async function hourlyCancelLoop() {
       console.log("⚠️ 小时撤单异常:", e.message);
     } finally {
       hourlyCancelRunning = false;
+      logElapsed("小时撤单结束", loopStartedAt, "openOrders=" + openOrdersCount + " ids=" + cancelIdsCount);
     }
   }
 }
 
 async function refreshStartTimes() {
   const markets = [...latestMarketsById.values()];
-  if (!markets.length) return;
+  if (!markets.length) return { markets: 0, refreshed: 0 };
 
   let refreshed = 0;
   for (const market of markets) {
@@ -1260,6 +1276,8 @@ async function refreshStartTimes() {
   if (startTimeRefreshLoopCount % 5 === 1) {
     console.log("⏱️ 开赛时间刷新 markets=" + markets.length + " pmStarts=" + refreshed + " known=" + latestStartTimesByMarketId.size);
   }
+
+  return { markets: markets.length, refreshed };
 }
 
 async function startTimeRefreshLoop() {
@@ -1270,13 +1288,16 @@ async function startTimeRefreshLoop() {
     }
 
     startTimeRefreshRunning = true;
+    const loopStartedAt = Date.now();
+    let refreshedStats = { markets: 0, refreshed: 0 };
     try {
       if (latestMarketsById.size === 0) await getMarkets();
-      await refreshStartTimes();
+      refreshedStats = await refreshStartTimes();
     } catch (e) {
       console.log("⚠️ 开赛时间刷新异常:", e.message);
     } finally {
       startTimeRefreshRunning = false;
+      logElapsed("开赛时间刷新结束", loopStartedAt, "markets=" + refreshedStats.markets + " pmStarts=" + refreshedStats.refreshed + " known=" + latestStartTimesByMarketId.size);
     }
 
     await new Promise(r => setTimeout(r, START_TIME_REFRESH_INTERVAL_MS));
@@ -1402,6 +1423,7 @@ async function main() {
   startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
   while (true) {
+    const mainLoopStartedAt = Date.now();
     try {
       // 1. 获取余额
       const balance = await getBalance();
@@ -1410,6 +1432,7 @@ async function main() {
 
       if (balance < 1n * 10n ** 18n) {
         console.log("⚠️ 余额不足，等待...");
+        logElapsed("主循环结束", mainLoopStartedAt, "reason=余额不足 balance=" + balUsdt.toFixed(2));
         await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
         continue;
       }
@@ -1444,9 +1467,11 @@ async function main() {
       }
 
       console.log("✅ 处理: " + processedMarkets + "市场, 新挂: " + totalNew + "单, 跳过: " + totalSkip + "单");
+      logElapsed("主循环结束", mainLoopStartedAt, "markets=" + processedMarkets + " new=" + totalNew + " skip=" + totalSkip);
 
     } catch (e) {
       console.error("❌ 主循环错误:", e.message);
+      logElapsed("主循环结束", mainLoopStartedAt, "error=" + e.message);
     }
 
     console.log("⏳ 5分钟后继续...\n");
