@@ -965,6 +965,16 @@ async function getBestBid(marketId, market, outcome) {
   }
 }
 
+async function getBestAsk(marketId, market, outcome) {
+  try {
+    const book = await getPredictBook(marketId);
+    return getBestPredictAskFromBook(book, market, outcome);
+  } catch (e) {
+    console.log("  ⚠️ getBestAsk错误: " + e.message);
+    return null;
+  }
+}
+
 async function rememberFilledMarkets() {
   try {
     const positions = await getPositions();
@@ -1172,15 +1182,35 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
       predictBidPromise = getBestBid(marketId, market, outcome);
       predictBidCache.set(predictBidCacheKey, predictBidPromise);
     }
+    const predictAskPromise = getBestAsk(marketId, market, outcome);
 
-    const [predictBid, polyQuote] = await Promise.all([
+    const [predictBid, predictAsk, polyQuote] = await Promise.all([
       predictBidPromise,
+      predictAskPromise,
       getPolymarketQuote(market, outcome),
     ]);
 
     if (!polyQuote.ok) {
       logCancelCondition("!polyQuote.ok", "marketId=" + marketId + " outcome=" + outcome.name + " reason=" + polyQuote.reason + " predictBid=" + predictBid + " title=" + marketTitle);
       await cancelOrder(orderId, "Polymarket校验失败 marketId=" + marketId + " outcome=" + outcome.name + " reason=" + polyQuote.reason + " predictBid=" + predictBid + " title=" + marketTitle);
+      return;
+    }
+
+    if (orderSide === "BUY" && !orderPrice) {
+      logCancelCondition("orderSide === BUY && !orderPrice", "marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " predictAsk=" + predictAsk + " title=" + marketTitle);
+      await cancelOrder(orderId, "买单价格缺失，无法校验积分点差 marketId=" + marketId + " outcome=" + outcome.name + " predictBid=" + predictBid + " predictAsk=" + predictAsk + " title=" + marketTitle);
+      return;
+    }
+
+    if (orderSide === "BUY" && !predictAsk) {
+      logCancelCondition("orderSide === BUY && !predictAsk", "marketId=" + marketId + " outcome=" + outcome.name + " orderPrice=" + orderPrice + " predictBid=" + predictBid + " ask=null title=" + marketTitle);
+      await cancelOrder(orderId, "卖一为空，不符合积分点差条件 marketId=" + marketId + " outcome=" + outcome.name + " orderPrice=" + orderPrice + " predictBid=" + predictBid + " ask=null title=" + marketTitle);
+      return;
+    }
+
+    if (orderSide === "BUY" && orderPrice && predictAsk && Number(predictAsk) - orderPrice > MAX_REWARD_SPREAD) {
+      logCancelCondition("orderSide === BUY && orderPrice && predictAsk && Number(predictAsk) - orderPrice > MAX_REWARD_SPREAD", "marketId=" + marketId + " outcome=" + outcome.name + " orderPrice=" + orderPrice + " predictAsk=" + predictAsk + " spread=" + (Number(predictAsk) - orderPrice) + " max=" + MAX_REWARD_SPREAD + " title=" + marketTitle);
+      await cancelOrder(orderId, "点差超过积分条件 marketId=" + marketId + " outcome=" + outcome.name + " orderPrice=" + orderPrice + " predictAsk=" + predictAsk + " spread=" + (Number(predictAsk) - orderPrice) + " max=" + MAX_REWARD_SPREAD + " title=" + marketTitle);
       return;
     }
 
@@ -1408,6 +1438,12 @@ async function processMarket(market, amountWei, existingOrders) {
     }
 
     const buyPrice = Number(priceWei) / 1e18;
+    if (!predictAsk) {
+      console.log("  ⏭️ 卖一为空，不符合积分点差条件 marketId=" + market.id + " outcome=" + outcome.name + " buy=" + buyPrice.toFixed(3) + " ask=null max=" + MAX_REWARD_SPREAD);
+      skipOrders++;
+      continue;
+    }
+
     if (predictAsk && predictAsk <= buyPrice + 1e-9) {
       skipOrders++;
       continue;
