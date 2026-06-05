@@ -732,6 +732,7 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
     error.details = {
       side: "BUY",
       marketId: market.id,
+      title: market.question || market.title || "",
       outcome: outcome.name,
       tokenId: outcome.onChainId,
       status: res.status,
@@ -1429,6 +1430,7 @@ async function processMarket(market, amountWei, existingOrders) {
       const detail = e.details
         ? " side=" + e.details.side
           + " marketId=" + e.details.marketId
+          + " title=" + e.details.title
           + " outcome=" + e.details.outcome
           + " tokenId=" + e.details.tokenId
           + " status=" + e.details.status
