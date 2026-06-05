@@ -219,6 +219,14 @@ function logElapsed(action, startedAt, details) {
   console.log("⏱️ " + action + "耗时:", (Date.now() - startedAt) + "ms", details || "");
 }
 
+function formatWei(value) {
+  if (value === undefined || value === null) return "";
+  const wei = BigInt(value);
+  const whole = wei / 10n ** 18n;
+  const fraction = (wei % (10n ** 18n)).toString().padStart(18, "0").slice(0, 6);
+  return whole.toString() + "." + fraction;
+}
+
 function getFirstValidDate(values) {
   for (const value of values) {
     const date = parseDateValue(value);
@@ -720,7 +728,25 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text.slice(0, 100));
+    const error = new Error(text.slice(0, 300));
+    error.details = {
+      side: "BUY",
+      marketId: market.id,
+      outcome: outcome.name,
+      tokenId: outcome.onChainId,
+      status: res.status,
+      priceWei: String(priceWei),
+      price: formatWei(priceWei),
+      amountWei: String(amountWei),
+      amount: formatWei(amountWei),
+      quantityWei: String(quantityWei),
+      quantity: formatWei(quantityWei),
+      makerAmount: String(makerAmount),
+      takerAmount: String(takerAmount),
+      pricePerShare: String(pricePerShare),
+      response: text.slice(0, 300),
+    };
+    throw error;
   }
   return (await res.json()).data;
 }
@@ -1400,10 +1426,27 @@ async function processMarket(market, amountWei, existingOrders) {
       newOrders++;
       console.log("  ✅ 挂单成功 marketId=" + market.id + " outcome=" + outcome.name + " price=" + price);
     } catch (e) {
+      const detail = e.details
+        ? " side=" + e.details.side
+          + " marketId=" + e.details.marketId
+          + " outcome=" + e.details.outcome
+          + " tokenId=" + e.details.tokenId
+          + " status=" + e.details.status
+          + " price=" + e.details.price
+          + " priceWei=" + e.details.priceWei
+          + " amount=" + e.details.amount
+          + " amountWei=" + e.details.amountWei
+          + " quantity=" + e.details.quantity
+          + " quantityWei=" + e.details.quantityWei
+          + " makerAmount=" + e.details.makerAmount
+          + " takerAmount=" + e.details.takerAmount
+          + " pricePerShare=" + e.details.pricePerShare
+          + " response=" + e.details.response
+        : " marketId=" + market.id + " outcome=" + outcome.name;
       if (e.message.includes("insufficient")) {
-        console.log("  ⚠️ 挂单失败 marketId=" + market.id + " outcome=" + outcome.name + " reason=余额不足");
+        console.log("  ⚠️ 挂单失败 reason=余额不足" + detail);
       } else {
-        console.log("  ❌ 挂单失败 marketId=" + market.id + " outcome=" + outcome.name + " error=" + e.message.slice(0,50));
+        console.log("  ❌ 挂单失败 error=" + e.message.slice(0, 100) + detail);
       }
     }
     await new Promise(r => setTimeout(r, OUTCOME_DELAY_MS));
