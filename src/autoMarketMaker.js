@@ -908,6 +908,17 @@ function getBestPredictAskFromBook(book, market, outcome) {
   return bestAsk;
 }
 
+function getBestDirectPredictAskFromBook(book) {
+  const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
+  return asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
+}
+
+function getRewardEligiblePredictAskFromBook(book, market, outcome) {
+  const position = getOutcomePosition(market, outcome);
+  if (position === 1 && market?.outcomes?.length === 2) return null;
+  return getBestDirectPredictAskFromBook(book);
+}
+
 function getSellLiquidity(book, minPrice) {
   const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
   const usableBids = bids.filter(bid => bid.price >= minPrice).sort((a, b) => b.price - a.price);
@@ -968,7 +979,7 @@ async function getBestBid(marketId, market, outcome) {
 async function getBestAsk(marketId, market, outcome) {
   try {
     const book = await getPredictBook(marketId);
-    return getBestPredictAskFromBook(book, market, outcome);
+    return getRewardEligiblePredictAskFromBook(book, market, outcome);
   } catch (e) {
     console.log("  ⚠️ getBestAsk错误: " + e.message);
     return null;
@@ -1423,7 +1434,7 @@ async function processMarket(market, amountWei, existingOrders) {
     }
 
     const predictBid = getBestPredictBidFromBook(predictBook, market, outcome);
-    const predictAsk = getBestPredictAskFromBook(predictBook, market, outcome);
+    const predictAsk = getRewardEligiblePredictAskFromBook(predictBook, market, outcome);
 
     const price = predictBid ? Math.max(Number(predictBid), polyQuote.price) : polyQuote.price;
     if (price < MIN_BUY_PRICE || price > 0.99) {
