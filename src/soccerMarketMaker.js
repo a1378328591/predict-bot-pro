@@ -26,8 +26,8 @@ console.error = (...args) => {
 };
 
 // ======== 配置 ========
-const ORDER_RATIO = 0.99; // 使用余额的99%
-const MAX_ORDER_USD = 10; // 足球策略单笔最多使用金额
+const ORDER_RATIO = 0.9; // 使用余额的99%
+const MAX_ORDER_USD = 1000; // 足球策略单笔最多使用金额
 const CHECK_INTERVAL_MS = 60_000; // 1分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 60 * 60_000; // 每小时撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
@@ -62,6 +62,10 @@ const VOLATILE_MARKET_KEYWORDS = [
   "crypto",
   "cryptocurrency",
   "model",
+  "o/u",
+  "-1.5",
+  "-2.5",
+  "-3.5",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
@@ -673,7 +677,6 @@ async function cancelOrder(orderId, reason) {
   cancelingOrders.add(key);
   try {
     const jwt = await getJwtTokenWithSDK();
-    const startedAt = Date.now();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
       headers: {
@@ -683,9 +686,7 @@ async function cancelOrder(orderId, reason) {
       },
       body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
-    logElapsed("撤单请求", startedAt, "orderId=" + orderId + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
-    console.log("🧯 已撤单:", orderId, reason || "");
   } catch (e) {
     cancelingOrders.delete(key);
     console.log("⚠️ 撤单失败:", orderId, reason || "", e.message);
@@ -700,7 +701,6 @@ async function cancelOrders(orderIds, reason) {
   for (const id of ids) cancelingOrders.add(id);
   try {
     const jwt = await getJwtTokenWithSDK();
-    const startedAt = Date.now();
     const res = await fetch("https://api.predict.fun/v1/orders/remove", {
       method: "POST",
       headers: {
@@ -710,9 +710,7 @@ async function cancelOrders(orderIds, reason) {
       },
       body: JSON.stringify({ data: { ids } }),
     });
-    logElapsed("批量撤单请求", startedAt, "count=" + ids.length + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
-    console.log("🧯 批量已撤单:", ids.length, reason || "");
     return ids.length;
   } catch (e) {
     for (const id of ids) cancelingOrders.delete(id);
@@ -759,7 +757,6 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
-  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -769,8 +766,6 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
     },
     body,
   });
-  logElapsed("挂买单请求", startedAt, "marketId=" + market.id + " tokenId=" + outcome.onChainId + " status=" + res.status);
-
   if (!res.ok) {
     const text = await res.text();
     const error = new Error(text.slice(0, 300));
@@ -833,7 +828,6 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei, expiresAt)
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
-  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -843,8 +837,6 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei, expiresAt)
     },
     body,
   });
-  logElapsed("挂卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
-
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text.slice(0, 100));
@@ -887,7 +879,6 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
   };
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
-  const startedAt = Date.now();
   const res = await fetch("https://api.predict.fun/v1/orders", {
     method: "POST",
     headers: {
@@ -897,8 +888,6 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
     },
     body,
   });
-  logElapsed("市价卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
-
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text.slice(0, 100));
@@ -1043,7 +1032,6 @@ async function closeSinglePosition(pos, openOrders) {
     const startingSoonReason = getMarketStartingSoonReason(market);
     const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId);
     if (openSellOrder && !startingSoonReason) {
-      console.log("📤 已有卖单，跳过重复平仓 marketId=" + marketId);
       return;
     }
 
@@ -1093,15 +1081,12 @@ async function positionMonitorLoop() {
       positionsCount = positions.length;
       openOrdersCount = openOrders.length;
       positionMonitorLoopCount++;
-      if (positionMonitorLoopCount % 10 === 1) {
-        console.log("🫀 持仓监控运行中 positions=" + positions.length + " openOrders=" + openOrders.length);
-      }
       await Promise.allSettled(positions.map(pos => closeSinglePosition(pos, openOrders)));
     } catch (e) {
       console.log("⚠️ 持仓监控异常:", e.message);
     } finally {
       positionMonitorRunning = false;
-      logElapsed("持仓监控结束", loopStartedAt, "positions=" + positionsCount + " openOrders=" + openOrdersCount);
+      if (positionsCount > 0 || openOrdersCount > 0) logElapsed("持仓监控结束", loopStartedAt, "positions=" + positionsCount + " openOrders=" + openOrdersCount);
     }
 
     await new Promise(r => setTimeout(r, POSITION_MONITOR_INTERVAL_MS));
@@ -1113,26 +1098,22 @@ function detectFilledTrackedOrders(openOrders, openOrdersFetchedAt = 0) {
   for (const [orderId, info] of trackedOrders.entries()) {
     if (cancelingOrders.has(orderId)) {
       trackedOrders.delete(orderId);
-      console.log("🧭 跟踪挂单属于主动撤单 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId);
       continue;
     }
 
     if (openIds.has(orderId)) {
       if (info.missingCount) {
         info.missingCount = 0;
-        console.log("🧭 跟踪挂单重新出现在OPEN orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId);
       }
       continue;
     }
 
     if (info.createdAt && openOrdersFetchedAt && info.createdAt >= openOrdersFetchedAt) {
-      console.log("🧭 跳过成交检测: tracked订单比OPEN快照新 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " trackedAt=" + info.createdAt + " openFetchedAt=" + openOrdersFetchedAt);
       continue;
     }
 
     info.missingCount = (info.missingCount || 0) + 1;
     if (info.missingCount < 2) {
-      console.log("🧭 跟踪挂单首次不在OPEN，等待下轮确认 orderId=" + orderId + " marketId=" + info.marketId + " tokenId=" + info.tokenId + " openOrders=" + openOrders.length + " openFetchedAt=" + openOrdersFetchedAt);
       continue;
     }
 
@@ -1307,15 +1288,12 @@ async function monitorLoop() {
       openOrdersCount = openOrders.length;
       await rememberFilledMarkets();
       monitorLoopCount++;
-      if (monitorLoopCount % 10 === 1) {
-        console.log("🛰️ 挂单监控运行中 openOrders=" + openOrders.length + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
-      }
       await monitorOpenOrders(openOrders, openOrdersFetchedAt);
     } catch (e) {
       console.log("⚠️ 高频监控异常:", e.message);
     } finally {
       monitorRunning = false;
-      logElapsed("挂单监控结束", loopStartedAt, "openOrders=" + openOrdersCount + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
+      if (openOrdersCount > 0 || trackedOrders.size > 0) logElapsed("挂单监控结束", loopStartedAt, "openOrders=" + openOrdersCount + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
     }
 
     await new Promise(r => setTimeout(r, MONITOR_INTERVAL_MS));
@@ -1344,13 +1322,12 @@ async function hourlyCancelLoop() {
       openOrdersCount = openOrders.length;
       cancelIdsCount = orderIds.length;
       hourlyCancelLoopCount++;
-      console.log("🕐 小时撤买单运行中 openOrders=" + openOrders.length + " buyIds=" + orderIds.length + " round=" + hourlyCancelLoopCount);
       await cancelOrders(orderIds, "每小时刷新买单，避免长期排队");
     } catch (e) {
       console.log("⚠️ 小时撤单异常:", e.message);
     } finally {
       hourlyCancelRunning = false;
-      logElapsed("小时撤单结束", loopStartedAt, "openOrders=" + openOrdersCount + " ids=" + cancelIdsCount);
+      if (cancelIdsCount > 0) logElapsed("小时撤单结束", loopStartedAt, "openOrders=" + openOrdersCount + " ids=" + cancelIdsCount);
     }
   }
 }
@@ -1375,10 +1352,6 @@ async function refreshStartTimes() {
   }
 
   startTimeRefreshLoopCount++;
-  if (startTimeRefreshLoopCount % 5 === 1) {
-    console.log("⏱️ 开赛时间刷新 markets=" + markets.length + " pmStarts=" + refreshed + " known=" + latestStartTimesByMarketId.size);
-  }
-
   return { markets: markets.length, refreshed };
 }
 
@@ -1399,7 +1372,7 @@ async function startTimeRefreshLoop() {
       console.log("⚠️ 开赛时间刷新异常:", e.message);
     } finally {
       startTimeRefreshRunning = false;
-      logElapsed("开赛时间刷新结束", loopStartedAt, "markets=" + refreshedStats.markets + " pmStarts=" + refreshedStats.refreshed + " known=" + latestStartTimesByMarketId.size);
+      if (refreshedStats.markets > 0 && refreshedStats.refreshed === 0) logElapsed("开赛时间刷新结束", loopStartedAt, "markets=" + refreshedStats.markets + " pmStarts=0 known=" + latestStartTimesByMarketId.size);
     }
 
     await new Promise(r => setTimeout(r, START_TIME_REFRESH_INTERVAL_MS));
@@ -1478,19 +1451,16 @@ async function processMarket(market, amountWei, existingOrders) {
     const predictAskLevel = getBestPredictAskLevelFromBook(predictBook, market, outcome);
 
     if (!predictBidLevel || predictBidLevel.valueUsd < PREDICT_MIN_BID_USD) {
-      console.log("  ⏭️ PR买一不足 marketId=" + market.id + " outcome=" + outcome.name + " bid=" + (predictBidLevel?.price ?? "null") + " value=" + (predictBidLevel?.valueUsd ?? 0).toFixed(2) + " min=" + PREDICT_MIN_BID_USD);
       skipOrders++;
       continue;
     }
 
     if (!predictAskLevel || predictAskLevel.valueUsd < PREDICT_MIN_ASK_USD) {
-      console.log("  ⏭️ PR卖一不足 marketId=" + market.id + " outcome=" + outcome.name + " ask=" + (predictAskLevel?.price ?? "null") + " value=" + (predictAskLevel?.valueUsd ?? 0).toFixed(2) + " min=" + PREDICT_MIN_ASK_USD);
       skipOrders++;
       continue;
     }
 
     if (polyQuote.price + PRICE_TOLERANCE < predictBidLevel.price) {
-      console.log("  ⏭️ PM优势不足 marketId=" + market.id + " outcome=" + outcome.name + " prBid=" + predictBidLevel.price.toFixed(3) + " pmBid=" + polyQuote.price.toFixed(3) + " diff=" + (polyQuote.price - predictBidLevel.price).toFixed(3));
       skipOrders++;
       continue;
     }
@@ -1510,7 +1480,6 @@ async function processMarket(market, amountWei, existingOrders) {
     const buyPrice = Number(priceWei) / 1e18;
     const quantity = Number(amountWei) / 1e18 / buyPrice;
     if (predictAskLevel.size < quantity) {
-      console.log("  ⏭️ PR卖一数量不足 marketId=" + market.id + " outcome=" + outcome.name + " need=" + quantity.toFixed(4) + " have=" + predictAskLevel.size.toFixed(4) + " ask=" + predictAskLevel.price.toFixed(3));
       skipOrders++;
       continue;
     }
@@ -1526,10 +1495,8 @@ async function processMarket(market, amountWei, existingOrders) {
       const orderId = getOrderId(order);
       if (orderId) {
         trackedOrders.set(String(orderId), { marketId: market.id, tokenId, createdAt: Date.now() });
-        console.log("🧾 跟踪新挂单 orderId=" + orderId + " marketId=" + market.id + " tokenId=" + tokenId + " outcome=" + outcome.name);
       }
       newOrders++;
-      console.log("  ✅ 足球买一挂单成功 marketId=" + market.id + " outcome=" + outcome.name + " prBid=" + price.toFixed(3) + " prAsk=" + predictAskLevel.price.toFixed(3) + " pmBid=" + polyQuote.price.toFixed(3));
     } catch (e) {
       const detail = e.details
         ? " side=" + e.details.side
@@ -1577,8 +1544,6 @@ async function main() {
       // 1. 获取余额
       const balance = await getBalance();
       const balUsdt = Number(balance) / 1e18;
-      console.log("\n💰 余额: " + balUsdt.toFixed(2) + " USDT");
-
       if (balance < 1n * 10n ** 18n) {
         console.log("⚠️ 余额不足，等待...");
         logElapsed("主循环结束", mainLoopStartedAt, "reason=余额不足 balance=" + balUsdt.toFixed(2));
@@ -1590,15 +1555,12 @@ async function main() {
       const ratioAmountWei = (balance * BigInt(Math.floor(ORDER_RATIO * 100))) / 100n;
       const maxOrderWei = BigInt(Math.floor(MAX_ORDER_USD * 100)) * 10n ** 16n;
       const amountWei = ratioAmountWei < maxOrderWei ? ratioAmountWei : maxOrderWei;
-      console.log("📌 每单: " + (Number(amountWei)/1e18).toFixed(2) + " USDT (余额比例与单笔上限取小)");
 
       // 3. 获取市场
       const markets = await getMarkets();
-      console.log("📈 市场: " + markets.length + "个");
 
       // 4. 获取现有挂单
       const existingOrders = await getOpenOrders();
-      console.log("📋 现有: " + existingOrders.length + "单");
 
       // 5. 批量挂单（每个市场独立）；撤单风控由高频监控循环独立执行
       let totalNew = 0;
@@ -1617,15 +1579,13 @@ async function main() {
         await new Promise(r => setTimeout(r, MARKET_DELAY_MS));
       }
 
-      console.log("✅ 处理: " + processedMarkets + "市场, 新挂: " + totalNew + "单, 跳过: " + totalSkip + "单");
-      logElapsed("主循环结束", mainLoopStartedAt, "markets=" + processedMarkets + " new=" + totalNew + " skip=" + totalSkip);
+      console.log("✅ 主循环: balance=" + balUsdt.toFixed(2) + " order=" + (Number(amountWei)/1e18).toFixed(2) + " markets=" + processedMarkets + " openOrders=" + existingOrders.length + " new=" + totalNew + " skip=" + totalSkip + " elapsedMs=" + (Date.now() - mainLoopStartedAt));
 
     } catch (e) {
       console.error("❌ 主循环错误:", e.message);
       logElapsed("主循环结束", mainLoopStartedAt, "error=" + e.message);
     }
 
-    console.log("⏳ 5分钟后继续...\n");
     await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
   }
 }
