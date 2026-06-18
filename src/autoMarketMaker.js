@@ -111,6 +111,7 @@ const rpcUrls = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolean
 const rpcProviders = new Map();
 let rpcIndex = 0;
 const polyMarketCache = new Map();
+const categoryCache = new Map();
 const trackedOrders = new Map();
 const cancelingOrders = new Set();
 const blockedMarkets = loadBlockedMarkets();
@@ -187,7 +188,39 @@ function getMacroPolicyKeyword(text) {
   return MACRO_POLICY_KEYWORDS.find(keyword => text.includes(keyword));
 }
 
-function getBlockedMarketReason(market) {
+async function getMarketCategory(categorySlug) {
+  if (!categorySlug) return null;
+  const key = String(categorySlug);
+  if (categoryCache.has(key)) return categoryCache.get(key);
+
+  try {
+    const res = await fetch("https://api.predict.fun/v1/categories/" + encodeURIComponent(key), {
+      headers: { "x-api-key": PREDICT_API_KEY },
+    });
+    if (!res.ok) throw new Error("category status " + res.status);
+    const json = await res.json();
+    const category = json.data ?? null;
+    categoryCache.set(key, category);
+    return category;
+  } catch (e) {
+    categoryCache.set(key, null);
+    console.log("⚠️ 获取市场分类失败:", key, e.message);
+    return null;
+  }
+}
+
+function getPoliticalTagReason(category) {
+  const tags = Array.isArray(category?.tags) ? category.tags : [];
+  const tag = tags.find(item => normalizeName(item?.name) === "politics");
+  if (!tag) return null;
+  return "政治类市场 tag=" + tag.name;
+}
+
+async function getBlockedMarketReason(market) {
+  const category = await getMarketCategory(market?.categorySlug);
+  const tagReason = getPoliticalTagReason(category);
+  if (tagReason) return tagReason;
+
   const text = [market?.categorySlug, market?.marketVariant, market?.title, market?.question]
     .filter(Boolean)
     .join(" ")
@@ -390,7 +423,7 @@ async function getMarkets() {
 
       for (const market of pageMarkets) {
         activeRewardMarketIds.add(String(market.id));
-        if (!getBlockedMarketReason(market) && !getLowRewardRateReason(market) && market.polymarketConditionIds?.length) {
+        if (!await getBlockedMarketReason(market) && !getLowRewardRateReason(market) && market.polymarketConditionIds?.length) {
           markets.push(market);
         }
       }
@@ -1161,7 +1194,7 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     const orderSide = getOrderSide(order);
     const orderPrice = getOrderPrice(order);
 
-    const blockedReason = getBlockedMarketReason(market ?? order.market);
+    const blockedReason = await getBlockedMarketReason(market ?? order.market);
     if (blockedReason) {
       blockMarket(marketId, blockedReason + " title=" + marketTitle);
       logCancelCondition("getBlockedMarketReason(market)", "marketId=" + marketId + " reason=" + blockedReason + " title=" + marketTitle);
@@ -1407,7 +1440,7 @@ async function processMarket(market, amountWei, existingOrders) {
     return { new: 0, skip: 1 };
   }
 
-  const blockedReason = getBlockedMarketReason(market);
+  const blockedReason = await getBlockedMarketReason(market);
   if (blockedReason) {
     blockMarket(market.id, blockedReason + " title=" + (market.question || market.title || ""));
     return { new: 0, skip: 1 };

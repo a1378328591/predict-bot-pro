@@ -46,6 +46,7 @@ const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "soccerBlockedMarkets.json";
+const WORLD_CUP_TAG_IDS = "113,81"; // World Cup, World Cup 2026
 const VOLATILE_MARKET_KEYWORDS = [
   "bitcoin",
   "btc",
@@ -371,6 +372,7 @@ async function getMarkets() {
         first: String(MARKET_PAGE_SIZE),
         status: "OPEN",
         hasActiveRewards: "true",
+        tagIds: WORLD_CUP_TAG_IDS,
         sort: "REWARD_RATE_DESC",
       });
       if (after) query.set("after", after);
@@ -1406,10 +1408,6 @@ async function startTimeRefreshLoop() {
 
 // 处理单个市场 - 独立错误处理
 async function processMarket(market, amountWei, existingOrders) {
-  if (!isSoccerMarket(market)) {
-    return { new: 0, skip: 1 };
-  }
-
   if (blockedMarkets.has(String(market.id))) {
     return { new: 0, skip: 1 };
   }
