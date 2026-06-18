@@ -37,6 +37,7 @@ const OUTCOME_DELAY_MS = 500; // 同一市场每个outcome之间等待500ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
 const MIN_BUY_PRICE = 0.25; // 低于25不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
+const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
@@ -60,6 +61,14 @@ const VOLATILE_MARKET_KEYWORDS = [
   "crypto",
   "cryptocurrency",
   "model",
+  "IPO",
+  "OpenAI",
+  "ipo",
+  "openai",
+  "o/u",
+  "-1.5",
+  "-2.5",
+  "-3.5",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
@@ -381,7 +390,7 @@ async function getMarkets() {
 
       for (const market of pageMarkets) {
         activeRewardMarketIds.add(String(market.id));
-        if (!getBlockedMarketReason(market) && market.polymarketConditionIds?.length) {
+        if (!getBlockedMarketReason(market) && !getLowRewardRateReason(market) && market.polymarketConditionIds?.length) {
           markets.push(market);
         }
       }
@@ -477,6 +486,18 @@ function getRewardEndingReason(market) {
   const cancelAt = getRewardCancelAt(market);
   if (!rewardEndsAt || !cancelAt || cancelAt.getTime() > Date.now()) return null;
   return "积分即将结束 endsAt=" + rewardEndsAt.toISOString() + " cancelAt=" + cancelAt.toISOString();
+}
+
+function getCurrentRewardHourlyRate(market) {
+  const hourlyRate = Number(market?.rewards?.current?.hourlyRate);
+  return Number.isFinite(hourlyRate) ? hourlyRate : null;
+}
+
+function getLowRewardRateReason(market) {
+  if (MIN_REWARD_HOURLY_RATE <= 0) return null;
+  const hourlyRate = getCurrentRewardHourlyRate(market);
+  if (hourlyRate === null || hourlyRate >= MIN_REWARD_HOURLY_RATE) return null;
+  return "积分过低 hourlyRate=" + hourlyRate + " min=" + MIN_REWARD_HOURLY_RATE;
 }
 
 function getKnownMarketStartInfo(market) {
@@ -1161,6 +1182,13 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
       return;
     }
 
+    const lowRewardRateReason = getLowRewardRateReason(market ?? order.market);
+    if (lowRewardRateReason) {
+      logCancelCondition("getLowRewardRateReason(market)", "marketId=" + marketId + " " + lowRewardRateReason + " title=" + marketTitle);
+      await cancelOrder(orderId, lowRewardRateReason + " marketId=" + marketId + " title=" + marketTitle);
+      return;
+    }
+
     const startedReason = getMarketStartedReason(market);
     if (startedReason) {
       logCancelCondition("getMarketStartedReason(market)", "marketId=" + marketId + " " + startedReason + " title=" + marketTitle);
@@ -1386,6 +1414,10 @@ async function processMarket(market, amountWei, existingOrders) {
   }
 
   if (getRewardEndingReason(market)) {
+    return { new: 0, skip: 1 };
+  }
+
+  if (getLowRewardRateReason(market)) {
     return { new: 0, skip: 1 };
   }
 
