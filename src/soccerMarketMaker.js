@@ -307,9 +307,35 @@ function getPositionBuyPrice(pos) {
   for (const value of candidates) {
     const price = Number(value);
     if (Number.isFinite(price) && price > 0 && price <= 1) return price;
+    if (Number.isFinite(price) && price > 1 && price <= 100) return price / 100;
   }
 
   return null;
+}
+
+function getPositionDebugInfo(pos) {
+  const priceFields = [
+    "averagePrice",
+    "averageBuyPriceUsd",
+    "averageEntryPrice",
+    "avgPrice",
+    "avgEntryPrice",
+    "entryPrice",
+    "entryPricePerShare",
+    "price",
+    "costBasisPrice",
+  ];
+  const scalarFields = Object.fromEntries(
+    Object.entries(pos || {}).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))
+  );
+  return {
+    scalarFields,
+    priceCandidates: Object.fromEntries(priceFields.map(field => [field, pos?.[field]])),
+    marketId: getPositionMarketId(pos),
+    tokenId: getPositionTokenId(pos),
+    quantityWei: getPositionQuantityWei(pos).toString(),
+    outcome: pos?.outcome,
+  };
 }
 
 async function initSDK() {
@@ -965,6 +991,11 @@ function roundSellPriceWei(price) {
   return BigInt(cents) * 10n ** 16n;
 }
 
+function floorSellPriceWei(price) {
+  const cents = Math.floor(price * 100 + 1e-9);
+  return BigInt(cents) * 10n ** 16n;
+}
+
 function roundBuyPriceWei(price) {
   const cents = Math.floor(price * 100 + 1e-9);
   return BigInt(cents) * 10n ** 16n;
@@ -1027,35 +1058,27 @@ async function closeSinglePosition(pos, openOrders) {
     const market = latestMarketsById.get(String(marketId)) ?? pos.market;
     if (market && !isSoccerMarket(market)) return;
 
-    const book = await getPredictBook(marketId);
-    const outcome = market?.outcomes?.find(item => String(item.onChainId) === String(tokenId)) ?? pos.outcome;
-    const startingSoonReason = getMarketStartingSoonReason(market);
-    const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId);
-    if (openSellOrder && !startingSoonReason) {
+    const buyPrice = getPositionBuyPrice(pos);
+    console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
+    if (!buyPrice) {
+      console.log("⚠️ 无法识别持仓成本价，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
       return;
     }
 
-    if (openSellOrder && startingSoonReason) {
+    const sellPriceWei = floorSellPriceWei(buyPrice);
+    if (sellPriceWei <= 0n) return;
+
+    const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId);
+    const openSellPrice = getOrderPrice(openSellOrder);
+    if (openSellOrder && openSellPrice && Math.abs(openSellPrice - Number(sellPriceWei) / 1e18) < 1e-9) return;
+    if (openSellOrder) {
       const sellOrderId = getOrderId(openSellOrder);
-      if (sellOrderId) await cancelOrder(sellOrderId, "开赛不足10分钟，改按买一价限价退出 marketId=" + marketId);
+      if (sellOrderId) await cancelOrder(sellOrderId, "持仓成本价变化，重挂限价卖 marketId=" + marketId);
     }
 
     console.log("🔎 足球平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
-
-    const exitLevel = startingSoonReason
-      ? getBestPredictBidLevelFromBook(book, market, outcome)
-      : getBestPredictAskLevelFromBook(book, market, outcome);
     const quantity = Number(quantityWei) / 1e18;
-    const minDepthUsd = startingSoonReason ? PREDICT_MIN_BID_USD : PREDICT_MIN_ASK_USD;
-
-    if (!exitLevel || exitLevel.size < quantity || exitLevel.valueUsd < minDepthUsd) {
-      console.log("⚠️ 足球平仓盘口不足 marketId=" + marketId + " mode=" + (startingSoonReason ? "bid" : "ask") + " need=" + quantity.toFixed(4) + " levelSize=" + (exitLevel?.size ?? 0).toFixed(4) + " value=" + (exitLevel?.valueUsd ?? 0).toFixed(2) + " minValue=" + minDepthUsd);
-      return;
-    }
-
-    const sellPriceWei = roundSellPriceWei(exitLevel.price);
-    if (sellPriceWei <= 0n) return;
-    console.log("📤 足球持仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " price=" + exitLevel.price.toFixed(3) + " mode=" + (startingSoonReason ? "开赛前买一价退出" : "当前卖一价") + " depthUsd=" + exitLevel.valueUsd.toFixed(2));
+    console.log("📤 足球持仓成本价限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " sellPrice=" + (Number(sellPriceWei) / 1e18).toFixed(2));
     const expiresAt = getRewardCancelAt(market) ?? undefined;
     await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
   } catch (e) {
