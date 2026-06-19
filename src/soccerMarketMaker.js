@@ -40,6 +40,7 @@ const MIN_BUY_PRICE = 0.15; // 低于15不挂买单
 const POLY_MIN_BID_USD = 500; // Polymarket 买一金额低于该值不挂/撤单
 const PREDICT_MIN_BID_USD = 100; // Predict 买一金额低于该值不挂/撤单
 const PREDICT_MIN_ASK_USD = 100; // Predict 卖一金额低于该值不挂/平仓
+const MIN_BUY_SHARES = 100; // 本次买单份额低于100不挂，等于100可挂
 const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/撤单/限价退出
@@ -1542,6 +1543,10 @@ async function processMarket(market, amountWei, existingOrders) {
 
     const buyPrice = Number(priceWei) / 1e18;
     const quantity = Number(amountWei) / 1e18 / buyPrice;
+    if (quantity < MIN_BUY_SHARES) {
+      skipOrders++;
+      continue;
+    }
     if (predictAskLevel.size < quantity) {
       skipOrders++;
       continue;
