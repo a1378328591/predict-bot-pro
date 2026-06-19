@@ -41,6 +41,7 @@ const POLY_MIN_BID_USD = 500; // Polymarket 买一金额低于该值不挂/撤�
 const PREDICT_MIN_BID_USD = 100; // Predict 买一金额低于该值不挂/撤单
 const PREDICT_MIN_ASK_USD = 100; // Predict 卖一金额低于该值不挂/平仓
 const MIN_BUY_SHARES = 100; // 本次买单份额低于100不挂，等于100可挂
+const ORDER_AMOUNT_REFRESH_DIFF_USD = 5; // 已有买单金额和当前目标金额差距超过5u则撤单重挂
 const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/撤单/限价退出
@@ -319,6 +320,31 @@ function getOrderQuantityWei(order) {
   }
 
   return null;
+}
+
+function getOrderAmountUsd(order) {
+  const candidates = [
+    order?.amount,
+    order?.amountUsd,
+    order?.valueUsd,
+    order?.remainingAmount,
+    order?.remainingAmountUsd,
+    order?.order?.amount,
+    order?.order?.amountUsd,
+    order?.order?.valueUsd,
+    order?.order?.remainingAmount,
+    order?.order?.remainingAmountUsd,
+  ];
+
+  for (const value of candidates) {
+    const amount = Number(value);
+    if (Number.isFinite(amount) && amount > 0) return amount > 1e9 ? amount / 1e18 : amount;
+  }
+
+  const price = getOrderPrice(order);
+  const quantityWei = getOrderQuantityWei(order);
+  if (!price || !quantityWei) return null;
+  return price * (Number(quantityWei) / 1e18);
 }
 
 function getPositionMarketId(pos) {
@@ -730,7 +756,7 @@ async function getPositions() {
 // 取消订单
 async function cancelOrder(orderId, reason) {
   const key = String(orderId);
-  if (cancelingOrders.has(key)) return;
+  if (cancelingOrders.has(key)) return false;
   cancelingOrders.add(key);
   try {
     const jwt = await getJwtTokenWithSDK();
@@ -744,9 +770,11 @@ async function cancelOrder(orderId, reason) {
       body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
+    return true;
   } catch (e) {
     cancelingOrders.delete(key);
     console.log("⚠️ 撤单失败:", orderId, reason || "", e.message);
+    return false;
   }
 }
 
@@ -1495,14 +1523,38 @@ async function processMarket(market, amountWei, existingOrders) {
 
     // 检查是否已有该方向的挂单（简化检查）
     const existing = existingOrders.find(o => {
-      const marketMatch = String(o.market?.id) === String(market.id) || String(o.marketId) === String(market.id);
-      const outcomeMatch = String(o.outcome?.onChainId) === String(tokenId) || String(o.tokenId) === String(tokenId) || String(o.outcomeId) === String(tokenId);
+      const marketMatch = String(getOrderMarketId(o)) === String(market.id);
+      const orderTokenId = getOrderTokenId(o);
+      const orderOutcomeId = getOrderOutcomeId(o);
+      const outcomeMatch = (orderTokenId && String(orderTokenId) === String(tokenId)) || (orderOutcomeId && String(orderOutcomeId) === String(outcome.id));
       return marketMatch && outcomeMatch;
     });
 
     if (existing) {
-      skipOrders++;
-      continue;
+      const existingAmountUsd = getOrderAmountUsd(existing);
+      const targetAmountUsd = Number(amountWei) / 1e18;
+      if (existingAmountUsd !== null && Math.abs(existingAmountUsd - targetAmountUsd) <= ORDER_AMOUNT_REFRESH_DIFF_USD) {
+        skipOrders++;
+        continue;
+      }
+
+      const existingOrderId = getOrderId(existing);
+      if (!existingOrderId) {
+        skipOrders++;
+        continue;
+      }
+
+      try {
+        const cancelled = await cancelOrder(existingOrderId, "买单金额变化过大，撤单重挂 marketId=" + market.id + " outcome=" + outcome.name + " oldAmount=" + (existingAmountUsd ?? "unknown") + " targetAmount=" + targetAmountUsd.toFixed(2));
+        if (!cancelled) {
+          skipOrders++;
+          continue;
+        }
+      } catch (e) {
+        console.log("⚠️ 买单重挂撤单异常 marketId=" + market.id + " outcome=" + outcome.name + ":", e.message);
+        skipOrders++;
+        continue;
+      }
     }
 
     const polyQuote = await getPolymarketQuote(market, outcome);
