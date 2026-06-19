@@ -36,7 +36,7 @@ const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
 const MARKET_DELAY_MS = 100; // 每个市场之间等待100ms
 const OUTCOME_DELAY_MS = 50; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
-const MIN_BUY_PRICE = 0.25; // 低于25不挂买单
+const MIN_BUY_PRICE = 0.15; // 低于15不挂买单
 const POLY_MIN_BID_USD = 500; // Polymarket 买一金额低于该值不挂/撤单
 const PREDICT_MIN_BID_USD = 100; // Predict 买一金额低于该值不挂/撤单
 const PREDICT_MIN_ASK_USD = 100; // Predict 卖一金额低于该值不挂/平仓
@@ -122,6 +122,7 @@ let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
 const closingPositions = new Set();
+const closePositionCooldowns = new Map();
 let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
@@ -208,11 +209,15 @@ function getOrderId(order) {
 }
 
 function getOrderMarketId(order) {
-  return order?.market?.id ?? order?.marketId;
+  return order?.market?.id ?? order?.marketId ?? order?.order?.marketId;
 }
 
 function getOrderTokenId(order) {
-  return order?.outcome?.onChainId ?? order?.tokenId ?? order?.outcomeId ?? order?.order?.tokenId;
+  return order?.outcome?.onChainId ?? order?.tokenId ?? order?.order?.tokenId ?? order?.outcomeTokenId ?? order?.outcome?.tokenId;
+}
+
+function getOrderOutcomeId(order) {
+  return order?.outcome?.id ?? order?.outcomeId ?? order?.order?.outcomeId;
 }
 
 function getOrderSide(order) {
@@ -279,6 +284,42 @@ function getOrderPrice(order) {
   return null;
 }
 
+function parseWeiQuantity(value) {
+  if (value === undefined || value === null || value === "") return null;
+  try {
+    if (typeof value === "bigint") return value;
+    const text = String(value);
+    if (/^\d+$/.test(text)) return BigInt(text);
+    const quantity = Number(text);
+    if (Number.isFinite(quantity) && quantity > 0) return BigInt(Math.floor(quantity * 1e18));
+  } catch {}
+  return null;
+}
+
+function getOrderQuantityWei(order) {
+  const candidates = [
+    order?.remainingQuantity,
+    order?.remainingQuantityWei,
+    order?.quantity,
+    order?.quantityWei,
+    order?.size,
+    order?.shares,
+    order?.order?.remainingQuantity,
+    order?.order?.remainingQuantityWei,
+    order?.order?.quantity,
+    order?.order?.quantityWei,
+    order?.order?.makerAmount,
+    order?.makerAmount,
+  ];
+
+  for (const value of candidates) {
+    const quantity = parseWeiQuantity(value);
+    if (quantity && quantity > 0n) return quantity;
+  }
+
+  return null;
+}
+
 function getPositionMarketId(pos) {
   return pos?.market?.id ?? pos?.marketId;
 }
@@ -287,29 +328,18 @@ function getPositionTokenId(pos) {
   return pos?.outcome?.onChainId ?? pos?.tokenId ?? pos?.outcomeId;
 }
 
+function getPositionOutcomeId(pos) {
+  return pos?.outcome?.id ?? pos?.outcomeId;
+}
+
 function getPositionQuantityWei(pos) {
   return BigInt(pos?.balance ?? pos?.amount ?? pos?.quantity ?? 0);
 }
 
 function getPositionBuyPrice(pos) {
-  const candidates = [
-    pos?.averagePrice,
-    pos?.averageBuyPriceUsd,
-    pos?.averageEntryPrice,
-    pos?.avgPrice,
-    pos?.avgEntryPrice,
-    pos?.entryPrice,
-    pos?.entryPricePerShare,
-    pos?.price,
-    pos?.costBasisPrice,
-  ];
-
-  for (const value of candidates) {
-    const price = Number(value);
-    if (Number.isFinite(price) && price > 0 && price <= 1) return price;
-    if (Number.isFinite(price) && price > 1 && price <= 100) return price / 100;
-  }
-
+  const price = Number(pos?.averageBuyPriceUsd);
+  if (Number.isFinite(price) && price > 0 && price <= 1) return price;
+  if (Number.isFinite(price) && price > 1 && price <= 100) return price / 100;
   return null;
 }
 
@@ -1037,21 +1067,27 @@ async function rememberFilledMarkets() {
   } catch (e) {}
 }
 
-function getOpenSellOrder(openOrders, marketId, tokenId) {
+function getOpenSellOrder(openOrders, marketId, tokenId, outcomeId) {
   return openOrders.find(order => {
     const side = String(order?.side ?? order?.order?.side ?? "").toUpperCase();
-    return side === "SELL" && String(getOrderMarketId(order)) === String(marketId) && String(getOrderTokenId(order)) === String(tokenId);
+    if (side !== "SELL" || String(getOrderMarketId(order)) !== String(marketId)) return false;
+    const orderTokenId = getOrderTokenId(order);
+    const orderOutcomeId = getOrderOutcomeId(order);
+    return (orderTokenId && String(orderTokenId) === String(tokenId)) || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
   });
 }
 
 async function closeSinglePosition(pos, openOrders) {
   const marketId = getPositionMarketId(pos);
   const tokenId = getPositionTokenId(pos);
+  const outcomeId = getPositionOutcomeId(pos);
   const quantityWei = getPositionQuantityWei(pos);
   if (!marketId || !tokenId || quantityWei <= 0n) return;
 
   const closeKey = String(marketId) + "-" + String(tokenId);
   if (closingPositions.has(closeKey)) return;
+  const cooldownUntil = closePositionCooldowns.get(closeKey);
+  if (cooldownUntil && cooldownUntil > Date.now()) return;
 
   try {
     closingPositions.add(closeKey);
@@ -1068,12 +1104,13 @@ async function closeSinglePosition(pos, openOrders) {
     const sellPriceWei = floorSellPriceWei(buyPrice);
     if (sellPriceWei <= 0n) return;
 
-    const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId);
+    const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId, outcomeId);
     const openSellPrice = getOrderPrice(openSellOrder);
-    if (openSellOrder && openSellPrice && Math.abs(openSellPrice - Number(sellPriceWei) / 1e18) < 1e-9) return;
+    const openSellQuantityWei = getOrderQuantityWei(openSellOrder);
+    if (openSellOrder && openSellPrice && Math.abs(openSellPrice - Number(sellPriceWei) / 1e18) < 1e-9 && openSellQuantityWei && openSellQuantityWei >= quantityWei) return;
     if (openSellOrder) {
       const sellOrderId = getOrderId(openSellOrder);
-      if (sellOrderId) await cancelOrder(sellOrderId, "持仓成本价变化，重挂限价卖 marketId=" + marketId);
+      if (sellOrderId) await cancelOrder(sellOrderId, "持仓价格或份额变化，重挂限价卖 marketId=" + marketId + " oldQty=" + (openSellQuantityWei?.toString() ?? "unknown") + " newQty=" + quantityWei.toString());
     }
 
     console.log("🔎 足球平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
@@ -1083,6 +1120,9 @@ async function closeSinglePosition(pos, openOrders) {
     await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
   } catch (e) {
     console.log("⚠️ 平仓异常 marketId=" + marketId + ":", e.message);
+    if (e.message.includes("insufficient_shares_balance") || e.message.includes("Insufficient shares")) {
+      closePositionCooldowns.set(closeKey, Date.now() + 60_000);
+    }
   } finally {
     closingPositions.delete(closeKey);
   }
