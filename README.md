@@ -28,28 +28,41 @@ cp .env.example .env
 
 ## 运行
 
-使用 PM2 后台运行：
+### 通用做市脚本
+
+`autoMarketMaker.js` 会遍历当前有积分奖励的 Predict 市场，并按 Polymarket 价格和流动性做风控过滤。
 
 ```bash
 pm2 start src/autoMarketMaker.js --name predict-bot --update-env
+```
+
+### 足球做市脚本
+
+`soccerMarketMaker.js` 只挂足球相关市场，只处理积分大于等于 `100`/h 的市场。持仓平仓不会立即止损吃单；正常情况下买一不低于成本时按买一 `+0.01` 挂卖，买一低于成本时按成本价挂卖等待成交；开赛前 20 分钟或已开赛时按当前卖一挂卖，即使低于成本也优先退出。
+
+```bash
+pm2 start src/soccerMarketMaker.js --name predict-bot-soccer --update-env
 ```
 
 查看运行日志：
 
 ```bash
 pm2 logs predict-bot
+pm2 logs predict-bot-soccer
 ```
 
 修改代码或 `.env` 后重启：
 
 ```bash
 pm2 restart predict-bot --update-env
+pm2 restart predict-bot-soccer --update-env
 ```
 
 停止机器人：
 
 ```bash
 pm2 stop predict-bot
+pm2 stop predict-bot-soccer
 ```
 
 不要使用 `>` 重定向日志。PM2 会输出进程日志，`autoMarketMaker.js` 也会用 UTF-8 自动写入：
