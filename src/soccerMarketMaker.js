@@ -225,7 +225,10 @@ function getOrderOutcomeId(order) {
 }
 
 function getOrderSide(order) {
-  return String(order?.side ?? order?.order?.side ?? "").toUpperCase();
+  const side = order?.side ?? order?.order?.side ?? "";
+  if (side === 0 || side === "0") return "BUY";
+  if (side === 1 || side === "1") return "SELL";
+  return String(side).toUpperCase();
 }
 
 function logCancelCondition(condition, details) {
