@@ -126,6 +126,7 @@ let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
 const closingPositions = new Set();
 const closePositionCooldowns = new Map();
+const pendingCloseOrders = new Map();
 let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
@@ -1116,6 +1117,28 @@ function getOpenSellOrder(openOrders, marketId, tokenId, outcomeId) {
   });
 }
 
+function rememberPendingCloseOrder(closeKey, order, marketId, tokenId, outcomeId, price, quantityWei) {
+  pendingCloseOrders.set(closeKey, {
+    orderId: getOrderId(order),
+    marketId,
+    tokenId,
+    outcomeId,
+    price,
+    quantityWei,
+    createdAt: Date.now(),
+  });
+}
+
+function getPendingCloseOrder(closeKey) {
+  const pending = pendingCloseOrders.get(closeKey);
+  if (!pending) return null;
+  if (Date.now() - pending.createdAt > 60_000) {
+    pendingCloseOrders.delete(closeKey);
+    return null;
+  }
+  return pending;
+}
+
 function getPositionOutcome(market, pos, tokenId, outcomeId) {
   const outcomes = Array.isArray(market?.outcomes) ? market.outcomes : [];
   return outcomes.find(outcome => String(outcome?.onChainId) === String(tokenId))
@@ -1196,16 +1219,20 @@ async function closeSinglePosition(pos, openOrders) {
     const openSellPrice = getOrderPrice(openSellOrder);
     const openSellQuantityWei = getOrderQuantityWei(openSellOrder);
     if (openSellOrder && openSellPrice && Math.abs(openSellPrice - sellPrice) < 1e-9 && openSellQuantityWei && openSellQuantityWei >= quantityWei) return;
+    const pendingCloseOrder = getPendingCloseOrder(closeKey);
+    if (pendingCloseOrder && Math.abs(pendingCloseOrder.price - sellPrice) < 1e-9 && pendingCloseOrder.quantityWei >= quantityWei) return;
     if (openSellOrder) {
       const sellOrderId = getOrderId(openSellOrder);
       if (sellOrderId) await cancelOrder(sellOrderId, "持仓价格或份额变化，重挂限价卖 marketId=" + marketId + " oldQty=" + (openSellQuantityWei?.toString() ?? "unknown") + " newQty=" + quantityWei.toString());
+      pendingCloseOrders.delete(closeKey);
     }
 
     console.log("🔎 足球平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
     const quantity = Number(quantityWei) / 1e18;
     console.log("📤 足球持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
     const expiresAt = getRewardCancelAt(market) ?? undefined;
-    await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
+    const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
+    rememberPendingCloseOrder(closeKey, sellOrder, marketId, tokenId, outcomeId, sellPrice, quantityWei);
   } catch (e) {
     console.log("⚠️ 平仓异常 marketId=" + marketId + ":", e.message);
     if (e.message.includes("insufficient_shares_balance") || e.message.includes("Insufficient shares")) {
