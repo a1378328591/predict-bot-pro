@@ -1055,13 +1055,6 @@ function floorSellPriceWei(price) {
   return BigInt(cents) * 10n ** 16n;
 }
 
-function priceToWei(price) {
-  const numericPrice = Number(price);
-  if (!Number.isFinite(numericPrice) || numericPrice <= 0) return 0n;
-  const [whole, fraction = ""] = numericPrice.toFixed(18).split(".");
-  return BigInt(whole) * 10n ** 18n + BigInt(fraction.padEnd(18, "0").slice(0, 18));
-}
-
 function roundBuyPriceWei(price) {
   const cents = Math.floor(price * 100 + 1e-9);
   return BigInt(cents) * 10n ** 16n;
@@ -1159,7 +1152,7 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    const sellPriceWei = priceToWei(bestAsk.price);
+    const sellPriceWei = roundSellPriceWei(bestAsk.price);
     if (sellPriceWei <= 0n) return;
     const sellPrice = Number(sellPriceWei) / 1e18;
     if (bestBid && Number(bestBid.price) >= sellPrice - 1e-9) {
