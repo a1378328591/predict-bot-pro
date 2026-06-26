@@ -45,6 +45,7 @@ const ORDER_AMOUNT_REFRESH_DIFF_USD = 5; // 已有买单金额和当前目标金
 const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/撤单/限价退出
+const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按卖一退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "soccerBlockedMarkets.json";
@@ -615,6 +616,15 @@ function getMarketStartingSoonReason(market) {
   return "开赛不足10分钟 source=" + info.source + " startsAt=" + info.startsAt.toISOString() + " closeAt=" + closeAt.toISOString();
 }
 
+function getCloseUrgencyReason(market) {
+  const info = getKnownMarketStartInfo(market);
+  if (!info) return null;
+  if (info.startsAt.getTime() <= Date.now()) return "已开赛 source=" + info.source + " startsAt=" + info.startsAt.toISOString();
+  const closeAt = new Date(info.startsAt.getTime() - CLOSE_BEFORE_START_MS);
+  if (closeAt.getTime() > Date.now()) return null;
+  return "开赛不足20分钟 source=" + info.source + " startsAt=" + info.startsAt.toISOString() + " closeAt=" + closeAt.toISOString();
+}
+
 function isSportsLikeMarket(market) {
   const text = [market.categorySlug, market.marketVariant, market.title, market.question].join(" ").toLowerCase();
   return text.includes("sport") || text.includes("esport") || text.includes("nba") || text.includes("nfl") || text.includes("nhl") || text.includes("mlb") || text.includes("ufc") || text.includes("soccer") || text.includes("football") || text.includes("league") || text.includes("dota") || text.includes("cs2") || text.includes("valorant");
@@ -1114,6 +1124,26 @@ function getPositionOutcome(market, pos, tokenId, outcomeId) {
     ?? null;
 }
 
+function getCloseSellPriceWei({ buyPrice, bestBid, bestAsk, urgentCloseReason }) {
+  if (!bestAsk) return { sellPriceWei: 0n, reason: "卖一为空" };
+
+  const buyPriceWei = roundSellPriceWei(buyPrice);
+  const bestAskPriceWei = roundSellPriceWei(bestAsk.price);
+  if (urgentCloseReason) {
+    return { sellPriceWei: bestAskPriceWei, reason: urgentCloseReason + "，按卖一退出" };
+  }
+
+  if (bestBid) {
+    const bestBidPriceWei = roundBuyPriceWei(bestBid.price);
+    if (bestBidPriceWei >= buyPriceWei) {
+      const targetPriceWei = bestBidPriceWei + 10n ** 16n;
+      return { sellPriceWei: targetPriceWei > 10n ** 18n ? 10n ** 18n : targetPriceWei, reason: "买一不低于成本，按买一+0.01挂卖" };
+    }
+  }
+
+  return { sellPriceWei: buyPriceWei, reason: "买一低于成本，按成本价挂卖" };
+}
+
 async function closeSinglePosition(pos, openOrders) {
   const marketId = getPositionMarketId(pos);
   const tokenId = getPositionTokenId(pos);
@@ -1152,11 +1182,13 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    const sellPriceWei = roundSellPriceWei(bestAsk.price);
+    const urgentCloseReason = getCloseUrgencyReason(market);
+    const closePrice = getCloseSellPriceWei({ buyPrice, bestBid, bestAsk, urgentCloseReason });
+    const sellPriceWei = closePrice.sellPriceWei;
     if (sellPriceWei <= 0n) return;
     const sellPrice = Number(sellPriceWei) / 1e18;
     if (bestBid && Number(bestBid.price) >= sellPrice - 1e-9) {
-      console.log("⚠️ 卖一价会直接吃单，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId + " bid=" + Number(bestBid.price).toFixed(6) + " ask=" + sellPrice.toFixed(6));
+      console.log("⚠️ 平仓价会直接吃单，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId + " bid=" + Number(bestBid.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
       return;
     }
 
@@ -1171,7 +1203,7 @@ async function closeSinglePosition(pos, openOrders) {
 
     console.log("🔎 足球平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
     const quantity = Number(quantityWei) / 1e18;
-    console.log("📤 足球持仓当前卖一限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + sellPrice.toFixed(6));
+    console.log("📤 足球持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
     const expiresAt = getRewardCancelAt(market) ?? undefined;
     await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
   } catch (e) {
