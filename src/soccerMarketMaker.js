@@ -1138,6 +1138,15 @@ function getOpenSellOrder(openOrders, marketId, tokenId, outcomeId) {
   });
 }
 
+function getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId) {
+  return openOrders.filter(order => {
+    if (getOrderSide(order) !== "BUY" || String(getOrderMarketId(order)) !== String(marketId)) return false;
+    const orderTokenId = getOrderTokenId(order);
+    const orderOutcomeId = getOrderOutcomeId(order);
+    return (orderTokenId && String(orderTokenId) === String(tokenId)) || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
+  });
+}
+
 function rememberPendingCloseOrder(closeKey, order, marketId, tokenId, outcomeId, price, quantityWei) {
   pendingCloseOrders.set(closeKey, {
     orderId: getOrderId(order),
@@ -1210,6 +1219,17 @@ async function closeSinglePosition(pos, openOrders) {
     if (!market || !outcome) {
       console.log("⚠️ 无法识别持仓市场或outcome，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
       return;
+    }
+
+    const openBuyOrders = getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId);
+    if (openBuyOrders.length > 0) {
+      const buyOrderIds = openBuyOrders.map(getOrderId).filter(Boolean);
+      const cancelled = await cancelOrders(buyOrderIds, "检测到持仓，撤对应买单 marketId=" + marketId + " tokenId=" + tokenId + " outcome=" + (outcome.name || outcomeId || ""));
+      if (cancelled < buyOrderIds.length) {
+        console.log("⚠️ 检测到持仓但对应买单未全部撤掉，等待下一轮 marketId=" + marketId + " tokenId=" + tokenId + " cancelled=" + cancelled + " total=" + buyOrderIds.length);
+        return;
+      }
+      console.log("🧹 检测到持仓，已撤对应买单 marketId=" + marketId + " tokenId=" + tokenId + " orders=" + cancelled);
     }
 
     const buyPrice = getPositionBuyPrice(pos);
