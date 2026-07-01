@@ -1020,9 +1020,21 @@ function getOutcomePosition(market, outcome) {
   return null;
 }
 
-function invertBinaryPrice(price) {
-  if (!Number.isFinite(Number(price))) return null;
-  return Number((1 - Number(price)).toFixed(6));
+function getMarketDecimalPrecision(market) {
+  const precision = Number(market?.decimalPrecision);
+  if (Number.isInteger(precision) && precision >= 0 && precision <= 18) return precision;
+  return 2;
+}
+
+function getMarketPriceTickWei(market) {
+  return 10n ** BigInt(18 - getMarketDecimalPrecision(market));
+}
+
+function invertBinaryPrice(price, market) {
+  const numericPrice = Number(price);
+  if (!Number.isFinite(numericPrice)) return null;
+  const factor = 10 ** getMarketDecimalPrecision(market);
+  return (factor - Math.round(numericPrice * factor)) / factor;
 }
 
 function getBestDirectPredictBidLevelFromBook(book) {
@@ -1042,7 +1054,7 @@ function getBestPredictBidLevelFromBook(book, market, outcome) {
   if (position === 1 && market?.outcomes?.length === 2) {
     const directAsk = getBestDirectPredictAskLevelFromBook(book);
     if (!directAsk) return null;
-    const price = invertBinaryPrice(directAsk.price);
+    const price = invertBinaryPrice(directAsk.price, market);
     return price === null ? null : { price, size: directAsk.size, valueUsd: price * directAsk.size };
   }
   return getBestDirectPredictBidLevelFromBook(book);
@@ -1053,25 +1065,31 @@ function getBestPredictAskLevelFromBook(book, market, outcome) {
   if (position === 1 && market?.outcomes?.length === 2) {
     const directBid = getBestDirectPredictBidLevelFromBook(book);
     if (!directBid) return null;
-    const price = invertBinaryPrice(directBid.price);
+    const price = invertBinaryPrice(directBid.price, market);
     return price === null ? null : { price, size: directBid.size, valueUsd: price * directBid.size };
   }
   return getBestDirectPredictAskLevelFromBook(book);
 }
 
-function roundSellPriceWei(price) {
-  const cents = Math.ceil(price * 100 - 1e-9);
-  return BigInt(cents) * 10n ** 16n;
+function roundSellPriceWei(price, market) {
+  const precision = getMarketDecimalPrecision(market);
+  const scale = 10 ** precision;
+  const units = Math.ceil(price * scale - 1e-9);
+  return BigInt(units) * getMarketPriceTickWei(market);
 }
 
-function floorSellPriceWei(price) {
-  const cents = Math.floor(price * 100 + 1e-9);
-  return BigInt(cents) * 10n ** 16n;
+function floorSellPriceWei(price, market) {
+  const precision = getMarketDecimalPrecision(market);
+  const scale = 10 ** precision;
+  const units = Math.floor(price * scale + 1e-9);
+  return BigInt(units) * getMarketPriceTickWei(market);
 }
 
-function roundBuyPriceWei(price) {
-  const cents = Math.floor(price * 100 + 1e-9);
-  return BigInt(cents) * 10n ** 16n;
+function roundBuyPriceWei(price, market) {
+  const precision = getMarketDecimalPrecision(market);
+  const scale = 10 ** precision;
+  const units = Math.floor(price * scale + 1e-9);
+  return BigInt(units) * getMarketPriceTickWei(market);
 }
 
 // 获取订单簿买一价
@@ -1150,20 +1168,21 @@ function getPositionOutcome(market, pos, tokenId, outcomeId) {
     ?? null;
 }
 
-function getCloseSellPriceWei({ buyPrice, bestBid, bestAsk, urgentCloseReason }) {
+function getCloseSellPriceWei({ market, buyPrice, bestBid, bestAsk, urgentCloseReason }) {
   if (!bestAsk) return { sellPriceWei: 0n, reason: "卖一为空" };
 
-  const buyPriceWei = roundSellPriceWei(buyPrice);
-  const bestAskPriceWei = roundSellPriceWei(bestAsk.price);
+  const buyPriceWei = roundSellPriceWei(buyPrice, market);
+  const bestAskPriceWei = roundSellPriceWei(bestAsk.price, market);
   if (urgentCloseReason) {
     return { sellPriceWei: bestAskPriceWei, reason: urgentCloseReason + "，按卖一退出" };
   }
 
   if (bestBid) {
-    const bestBidPriceWei = roundBuyPriceWei(bestBid.price);
+    const bestBidPriceWei = roundBuyPriceWei(bestBid.price, market);
     if (bestBidPriceWei >= buyPriceWei) {
-      const targetPriceWei = bestBidPriceWei + 10n ** 16n;
-      return { sellPriceWei: targetPriceWei > 10n ** 18n ? 10n ** 18n : targetPriceWei, reason: "买一不低于成本，按买一+0.01挂卖" };
+      const targetPriceWei = bestBidPriceWei + getMarketPriceTickWei(market);
+      const step = (Number(getMarketPriceTickWei(market)) / 1e18).toFixed(getMarketDecimalPrecision(market));
+      return { sellPriceWei: targetPriceWei > 10n ** 18n ? 10n ** 18n : targetPriceWei, reason: "买一不低于成本，按买一+" + step + "挂卖" };
     }
   }
 
@@ -1209,7 +1228,7 @@ async function closeSinglePosition(pos, openOrders) {
     }
 
     const urgentCloseReason = getCloseUrgencyReason(market);
-    const closePrice = getCloseSellPriceWei({ buyPrice, bestBid, bestAsk, urgentCloseReason });
+    const closePrice = getCloseSellPriceWei({ market, buyPrice, bestBid, bestAsk, urgentCloseReason });
     const sellPriceWei = closePrice.sellPriceWei;
     if (sellPriceWei <= 0n) return;
     const sellPrice = Number(sellPriceWei) / 1e18;
@@ -1676,7 +1695,7 @@ async function processMarket(market, amountWei, existingOrders) {
       continue;
     }
 
-    const priceWei = roundBuyPriceWei(price);
+    const priceWei = roundBuyPriceWei(price, market);
     if (priceWei <= 0n) {
       skipOrders++;
       continue;
