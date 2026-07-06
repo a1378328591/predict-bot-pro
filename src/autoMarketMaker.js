@@ -126,6 +126,7 @@ let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
 const closingPositions = new Set();
+const MIN_POSITION_CLOSE_QUANTITY_WEI = 1n * 10n ** 18n;
 let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
@@ -243,15 +244,22 @@ function getOrderId(order) {
 }
 
 function getOrderMarketId(order) {
-  return order?.market?.id ?? order?.marketId;
+  return order?.market?.id ?? order?.marketId ?? order?.order?.marketId;
 }
 
 function getOrderTokenId(order) {
   return order?.outcome?.onChainId ?? order?.tokenId ?? order?.outcomeId ?? order?.order?.tokenId;
 }
 
+function getOrderOutcomeId(order) {
+  return order?.outcome?.id ?? order?.outcomeId ?? order?.order?.outcomeId;
+}
+
 function getOrderSide(order) {
-  return String(order?.side ?? order?.order?.side ?? "").toUpperCase();
+  const side = order?.side ?? order?.order?.side ?? "";
+  if (side === 0 || side === "0") return "BUY";
+  if (side === 1 || side === "1") return "SELL";
+  return String(side).toUpperCase();
 }
 
 function logCancelCondition(condition, details) {
@@ -320,6 +328,10 @@ function getPositionMarketId(pos) {
 
 function getPositionTokenId(pos) {
   return pos?.outcome?.onChainId ?? pos?.tokenId ?? pos?.outcomeId;
+}
+
+function getPositionOutcomeId(pos) {
+  return pos?.outcome?.id ?? pos?.outcomeId;
 }
 
 function getPositionQuantityWei(pos) {
@@ -941,16 +953,28 @@ function getOutcomePosition(market, outcome) {
   return null;
 }
 
-function invertBinaryPrice(price) {
-  if (!Number.isFinite(Number(price))) return null;
-  return Number((1 - Number(price)).toFixed(6));
+function getMarketDecimalPrecision(market) {
+  const precision = Number(market?.decimalPrecision);
+  if (Number.isInteger(precision) && precision >= 0 && precision <= 18) return precision;
+  return 2;
+}
+
+function getMarketPriceTickWei(market) {
+  return 10n ** BigInt(18 - getMarketDecimalPrecision(market));
+}
+
+function invertBinaryPrice(price, market) {
+  const numericPrice = Number(price);
+  if (!Number.isFinite(numericPrice)) return null;
+  const factor = 10 ** getMarketDecimalPrecision(market);
+  return (factor - Math.round(numericPrice * factor)) / factor;
 }
 
 function getBestPredictBidFromBook(book, market, outcome) {
   const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
   const bestBid = bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
   const position = getOutcomePosition(market, outcome);
-  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictAskFromBook(book));
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictAskFromBook(book), market);
   return bestBid;
 }
 
@@ -958,7 +982,7 @@ function getBestPredictAskFromBook(book, market, outcome) {
   const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
   const bestAsk = asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
   const position = getOutcomePosition(market, outcome);
-  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictBidFromBook(book));
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictBidFromBook(book), market);
   return bestAsk;
 }
 
@@ -985,7 +1009,7 @@ function getOutcomeSellLiquidity(book, market, outcome, minPrice) {
   if (position === 1 && market?.outcomes?.length === 2) {
     const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
     const usableAsks = asks
-      .map(ask => ({ price: invertBinaryPrice(ask.price), size: ask.size }))
+      .map(ask => ({ price: invertBinaryPrice(ask.price, market), size: ask.size }))
       .filter(ask => ask.price !== null && ask.price >= minPrice)
       .sort((a, b) => b.price - a.price);
     const size = usableAsks.reduce((sum, ask) => sum + ask.size, 0);
@@ -1000,23 +1024,27 @@ function getOutcomeMarketBook(book, market, outcome) {
   if (position !== 1 || market?.outcomes?.length !== 2) return book;
 
   const bids = Array.isArray(book?.asks)
-    ? book.asks.map(parseDepthLevel).filter(Boolean).map(ask => [invertBinaryPrice(ask.price), ask.size]).filter(([price]) => price !== null).sort((a, b) => b[0] - a[0])
+    ? book.asks.map(parseDepthLevel).filter(Boolean).map(ask => [invertBinaryPrice(ask.price, market), ask.size]).filter(([price]) => price !== null).sort((a, b) => b[0] - a[0])
     : [];
   const asks = Array.isArray(book?.bids)
-    ? book.bids.map(parseDepthLevel).filter(Boolean).map(bid => [invertBinaryPrice(bid.price), bid.size]).filter(([price]) => price !== null).sort((a, b) => a[0] - b[0])
+    ? book.bids.map(parseDepthLevel).filter(Boolean).map(bid => [invertBinaryPrice(bid.price, market), bid.size]).filter(([price]) => price !== null).sort((a, b) => a[0] - b[0])
     : [];
 
   return { ...book, bids, asks };
 }
 
-function roundSellPriceWei(price) {
-  const cents = Math.ceil(price * 100 - 1e-9);
-  return BigInt(cents) * 10n ** 16n;
+function roundSellPriceWei(price, market) {
+  const precision = getMarketDecimalPrecision(market);
+  const scale = 10 ** precision;
+  const units = Math.ceil(price * scale - 1e-9);
+  return BigInt(units) * getMarketPriceTickWei(market);
 }
 
-function roundBuyPriceWei(price) {
-  const cents = Math.floor(price * 100 + 1e-9);
-  return BigInt(cents) * 10n ** 16n;
+function roundBuyPriceWei(price, market) {
+  const precision = getMarketDecimalPrecision(market);
+  const scale = 10 ** precision;
+  const units = Math.floor(price * scale + 1e-9);
+  return BigInt(units) * getMarketPriceTickWei(market);
 }
 
 // 获取订单簿买一价
@@ -1045,7 +1073,7 @@ async function rememberFilledMarkets() {
     const positions = await getPositions();
     for (const pos of positions) {
       const bal = BigInt(pos.balance || 0);
-      if (bal > 0n) {
+      if (bal >= MIN_POSITION_CLOSE_QUANTITY_WEI) {
         const marketId = pos.market?.id ?? pos.marketId;
         console.log("🔎 检测到持仓准备拉黑 marketId=" + marketId + " tokenId=" + getPositionTokenId(pos) + " balance=" + bal.toString());
         blockMarket(marketId, "检测到持仓，疑似被塞订单");
@@ -1056,16 +1084,29 @@ async function rememberFilledMarkets() {
 
 function hasOpenSellOrder(openOrders, marketId, tokenId) {
   return openOrders.some(order => {
-    const side = String(order?.side ?? order?.order?.side ?? "").toUpperCase();
-    return side === "SELL" && String(getOrderMarketId(order)) === String(marketId) && String(getOrderTokenId(order)) === String(tokenId);
+    return getOrderSide(order) === "SELL" && String(getOrderMarketId(order)) === String(marketId) && String(getOrderTokenId(order)) === String(tokenId);
+  });
+}
+
+function getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId) {
+  return openOrders.filter(order => {
+    if (getOrderSide(order) !== "BUY" || String(getOrderMarketId(order)) !== String(marketId)) return false;
+    const orderTokenId = getOrderTokenId(order);
+    const orderOutcomeId = getOrderOutcomeId(order);
+    return (orderTokenId && String(orderTokenId) === String(tokenId)) || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
   });
 }
 
 async function closeSinglePosition(pos, openOrders) {
   const marketId = getPositionMarketId(pos);
   const tokenId = getPositionTokenId(pos);
+  const outcomeId = getPositionOutcomeId(pos);
   const quantityWei = getPositionQuantityWei(pos);
   if (!marketId || !tokenId || quantityWei <= 0n) return;
+  if (quantityWei < MIN_POSITION_CLOSE_QUANTITY_WEI) {
+    console.log("⏭️ 持仓份额小于1，跳过平仓 marketId=" + marketId + " tokenId=" + tokenId + " quantity=" + (Number(quantityWei) / 1e18).toFixed(4));
+    return;
+  }
 
   const closeKey = String(marketId) + "-" + String(tokenId);
   if (closingPositions.has(closeKey)) return;
@@ -1074,6 +1115,16 @@ async function closeSinglePosition(pos, openOrders) {
     closingPositions.add(closeKey);
     console.log("🔎 平仓监控检测到持仓准备拉黑 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
     blockMarket(marketId, "检测到持仓，停止该市场后续挂买单");
+
+    const openBuyOrders = getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId);
+    if (openBuyOrders.length > 0) {
+      const buyOrderIds = openBuyOrders.map(getOrderId).filter(Boolean);
+      const cancelled = await cancelOrders(buyOrderIds, "检测到持仓，撤对应买单 marketId=" + marketId + " tokenId=" + tokenId);
+      if (cancelled < buyOrderIds.length) {
+        console.log("⚠️ 检测到持仓但对应买单未全部撤掉，等待下一轮 marketId=" + marketId + " tokenId=" + tokenId + " cancelled=" + cancelled + " total=" + buyOrderIds.length);
+        return;
+      }
+    }
 
     if (hasOpenSellOrder(openOrders, marketId, tokenId)) {
       console.log("📤 已有卖单，跳过重复平仓 marketId=" + marketId);
@@ -1106,7 +1157,7 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    const sellPriceWei = roundSellPriceWei(minSellPrice);
+    const sellPriceWei = roundSellPriceWei(minSellPrice, market);
     if (sellPriceWei <= 0n) return;
     console.log("📤 平仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buy=" + buyPrice.toFixed(3) + " minSell=" + minSellPrice.toFixed(3) + " bestBid=" + liquidity.bestPrice);
     await placeSellLimit(market, tokenId, sellPriceWei, quantityWei);
@@ -1507,7 +1558,7 @@ async function processMarket(market, amountWei, existingOrders) {
       continue;
     }
 
-    const priceWei = roundBuyPriceWei(price);
+    const priceWei = roundBuyPriceWei(price, market);
     if (priceWei <= 0n) {
       skipOrders++;
       continue;

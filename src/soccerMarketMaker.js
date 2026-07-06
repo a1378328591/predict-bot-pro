@@ -26,10 +26,10 @@ console.error = (...args) => {
 };
 
 // ======== 配置 ========
-const ORDER_RATIO = 0.95; // 使用余额的99%
-const MAX_ORDER_USD = 850; // 足球策略单笔最多使用金额
-const CHECK_INTERVAL_MS = 120_000; // 1分钟执行一轮挂单
-const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每小时撤掉现有挂单，避免长期排队被顶在后面
+const ORDER_RATIO = 0.99; // 使用余额的99%
+const MAX_ORDER_USD = 800; // 足球策略单笔最多使用金额
+const CHECK_INTERVAL_MS = 120_000; // 2分钟执行一轮挂单
+const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
@@ -127,6 +127,7 @@ let startTimeRefreshRunning = false;
 const closingPositions = new Set();
 const closePositionCooldowns = new Map();
 const pendingCloseOrders = new Map();
+const MIN_POSITION_CLOSE_QUANTITY_WEI = 1n * 10n ** 18n;
 let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
@@ -1097,9 +1098,9 @@ async function getBestBid(marketId, market, outcome) {
   try {
     const book = await getPredictBook(marketId);
     return getBestPredictBidLevelFromBook(book, market, outcome)?.price ?? null;
-  } catch (e) { 
+  } catch (e) {
     console.log("  ⚠️ getBestBid错误: " + e.message);
-    return null; 
+    return null;
   }
 }
 
@@ -1204,6 +1205,10 @@ async function closeSinglePosition(pos, openOrders) {
   const outcomeId = getPositionOutcomeId(pos);
   const quantityWei = getPositionQuantityWei(pos);
   if (!marketId || !tokenId || quantityWei <= 0n) return;
+  if (quantityWei < MIN_POSITION_CLOSE_QUANTITY_WEI) {
+    console.log("⏭️ 持仓份额小于1，跳过平仓 marketId=" + marketId + " tokenId=" + tokenId + " quantity=" + (Number(quantityWei) / 1e18).toFixed(4));
+    return;
+  }
 
   const closeKey = String(marketId) + "-" + String(tokenId);
   if (closingPositions.has(closeKey)) return;

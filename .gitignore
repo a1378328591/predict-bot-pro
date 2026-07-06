@@ -7,6 +7,13 @@
 # node
 node_modules/
 
+# editor/cache/assets
+.idea/
+__pycache__/
+assets/
+*.xml
+*.svg
+
 # logs
 *.log
 blockedMarkets.json
