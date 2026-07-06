@@ -28,14 +28,14 @@ console.error = (...args) => {
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
 const CHECK_INTERVAL_MS = 5 * 60_000; // 5分钟执行一轮挂单
-const HOURLY_CANCEL_INTERVAL_MS = 60 * 60_000; // 每小时撤掉现有挂单，避免长期排队被顶在后面
+const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
 const MARKET_DELAY_MS = 1_000; // 每个市场之间等待1秒
 const OUTCOME_DELAY_MS = 500; // 同一市场每个outcome之间等待500ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
-const MIN_BUY_PRICE = 0.25; // 低于25不挂买单
+const MIN_BUY_PRICE = 0.30; // 低于25不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
 const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
