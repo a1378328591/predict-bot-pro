@@ -248,7 +248,7 @@ function getOrderMarketId(order) {
 }
 
 function getOrderTokenId(order) {
-  return order?.outcome?.onChainId ?? order?.tokenId ?? order?.outcomeId ?? order?.order?.tokenId;
+  return order?.outcome?.onChainId ?? order?.tokenId ?? order?.order?.tokenId ?? order?.outcomeTokenId ?? order?.outcome?.tokenId ?? order?.outcomeId;
 }
 
 function getOrderOutcomeId(order) {
@@ -1049,19 +1049,20 @@ function invertBinaryPrice(price, market) {
 }
 
 function getBestPredictBidFromBook(book, market, outcome) {
-  const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
-  const bestBid = bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
   const position = getOutcomePosition(market, outcome);
-  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictAskFromBook(book), market);
-  return bestBid;
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestDirectPredictAskFromBook(book), market);
+  return getBestDirectPredictBidFromBook(book);
 }
 
 function getBestPredictAskFromBook(book, market, outcome) {
-  const asks = Array.isArray(book?.asks) ? book.asks.map(parseDepthLevel).filter(Boolean) : [];
-  const bestAsk = asks.sort((a, b) => a.price - b.price)[0]?.price ?? null;
   const position = getOutcomePosition(market, outcome);
-  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestPredictBidFromBook(book), market);
-  return bestAsk;
+  if (position === 1 && market?.outcomes?.length === 2) return invertBinaryPrice(getBestDirectPredictBidFromBook(book), market);
+  return getBestDirectPredictAskFromBook(book);
+}
+
+function getBestDirectPredictBidFromBook(book) {
+  const bids = Array.isArray(book?.bids) ? book.bids.map(parseDepthLevel).filter(Boolean) : [];
+  return bids.sort((a, b) => b.price - a.price)[0]?.price ?? null;
 }
 
 function getBestDirectPredictAskFromBook(book) {
@@ -1070,9 +1071,7 @@ function getBestDirectPredictAskFromBook(book) {
 }
 
 function getRewardEligiblePredictAskFromBook(book, market, outcome) {
-  const position = getOutcomePosition(market, outcome);
-  if (position === 1 && market?.outcomes?.length === 2) return null;
-  return getBestDirectPredictAskFromBook(book);
+  return getBestPredictAskFromBook(book, market, outcome);
 }
 
 function getSellLiquidity(book, minPrice) {
@@ -1609,14 +1608,17 @@ async function processMarket(market, amountWei, existingOrders) {
     const tokenId = outcome.onChainId;
     if (!tokenId) continue;
 
-    // 检查是否已有该方向的挂单（简化检查）
+    // 检查是否已有该 outcome 的挂单，避免同方向重复追加占用额度。
     const existing = existingOrders.find(o => {
-      const marketMatch = String(o.market?.id) === String(market.id) || String(o.marketId) === String(market.id);
-      const outcomeMatch = String(o.outcome?.onChainId) === String(tokenId) || String(o.tokenId) === String(tokenId) || String(o.outcomeId) === String(tokenId);
+      const marketMatch = String(getOrderMarketId(o)) === String(market.id);
+      const orderTokenId = getOrderTokenId(o);
+      const orderOutcomeId = getOrderOutcomeId(o);
+      const outcomeMatch = (orderTokenId && String(orderTokenId) === String(tokenId)) || (outcome.id && orderOutcomeId && String(orderOutcomeId) === String(outcome.id));
       return marketMatch && outcomeMatch;
     });
 
     if (existing) {
+      console.log("  ⏭️ 已有同outcome挂单，跳过追加 marketId=" + market.id + " outcome=" + outcome.name + " tokenId=" + tokenId + " orderId=" + (getOrderId(existing) || ""));
       skipOrders++;
       continue;
     }
