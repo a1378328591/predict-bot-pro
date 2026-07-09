@@ -27,16 +27,16 @@ console.error = (...args) => {
 
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
-const CHECK_INTERVAL_MS = 5 * 60_000; // 5分钟执行一轮挂单
+const CHECK_INTERVAL_MS = 3 * 60_000; // 3分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
-const MARKET_DELAY_MS = 1_000; // 每个市场之间等待1秒
-const OUTCOME_DELAY_MS = 500; // 同一市场每个outcome之间等待500ms
+const MARKET_DELAY_MS = 100; // 每个市场之间等待100ms
+const OUTCOME_DELAY_MS = 50; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
-const MIN_BUY_PRICE = 0.30; // 低于25不挂买单
-const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
+const MIN_BUY_PRICE = 0.30; // 价格低于30不挂买单
+const POLY_MIN_BID_USD = 100; // Polymarket 买一金额低于该值不挂/撤单
 const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
@@ -283,23 +283,6 @@ function safeJson(value, maxLength = 1200) {
 function getArraySummary(value) {
   if (!Array.isArray(value)) return { type: typeof value, length: null, sample: value ?? null };
   return { type: "array", length: value.length, sample: value.slice(0, 3) };
-}
-
-function logOpenOrdersDiagnostics(openOrders) {
-  const samples = openOrders.slice(0, 5).map(order => ({
-    keys: Object.keys(order || {}),
-    orderKeys: Object.keys(order?.order || {}),
-    marketKeys: Object.keys(order?.market || {}),
-    outcomeKeys: Object.keys(order?.outcome || {}),
-    id: getOrderId(order),
-    side: getOrderSide(order),
-    marketId: getOrderMarketId(order),
-    tokenId: getOrderTokenId(order),
-    outcomeId: getOrderOutcomeId(order),
-    price: getOrderPrice(order),
-    raw: order,
-  }));
-  console.log("🧪 openOrders字段诊断 count=" + openOrders.length + " samples=" + safeJson(samples, 5000));
 }
 
 function logOrderbookDiagnostics(reason, market, outcome, book) {
@@ -747,7 +730,6 @@ async function getOpenOrders(throwOnError = false) {
 
     latestOpenOrders = orders;
     latestOpenOrdersFetchedAt = Date.now();
-    logOpenOrdersDiagnostics(orders);
     return orders;
   } catch (e) {
     if (throwOnError) throw e;
