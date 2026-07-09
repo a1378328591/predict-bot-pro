@@ -270,6 +270,83 @@ function logElapsed(action, startedAt, details) {
   console.log("⏱️ " + action + "耗时:", (Date.now() - startedAt) + "ms", details || "");
 }
 
+function safeJson(value, maxLength = 1200) {
+  try {
+    const text = JSON.stringify(value, (_, item) => typeof item === "bigint" ? item.toString() : item);
+    if (!text) return "";
+    return text.length > maxLength ? text.slice(0, maxLength) + "..." : text;
+  } catch (e) {
+    return "[unserializable: " + e.message + "]";
+  }
+}
+
+function getArraySummary(value) {
+  if (!Array.isArray(value)) return { type: typeof value, length: null, sample: value ?? null };
+  return { type: "array", length: value.length, sample: value.slice(0, 3) };
+}
+
+function logOpenOrdersDiagnostics(openOrders) {
+  const samples = openOrders.slice(0, 5).map(order => ({
+    keys: Object.keys(order || {}),
+    orderKeys: Object.keys(order?.order || {}),
+    marketKeys: Object.keys(order?.market || {}),
+    outcomeKeys: Object.keys(order?.outcome || {}),
+    id: getOrderId(order),
+    side: getOrderSide(order),
+    marketId: getOrderMarketId(order),
+    tokenId: getOrderTokenId(order),
+    outcomeId: getOrderOutcomeId(order),
+    price: getOrderPrice(order),
+    raw: order,
+  }));
+  console.log("🧪 openOrders字段诊断 count=" + openOrders.length + " samples=" + safeJson(samples, 5000));
+}
+
+function logOrderbookDiagnostics(reason, market, outcome, book) {
+  const position = getOutcomePosition(market, outcome);
+  const summary = {
+    reason,
+    marketId: market?.id,
+    outcome: outcome?.name,
+    tokenId: outcome?.onChainId,
+    outcomeId: outcome?.id,
+    position,
+    outcomesLength: Array.isArray(market?.outcomes) ? market.outcomes.length : null,
+    bookKeys: Object.keys(book || {}),
+    bids: getArraySummary(book?.bids),
+    asks: getArraySummary(book?.asks),
+    rawBook: book,
+  };
+  console.log("🧪 orderbook诊断 " + safeJson(summary, 5000));
+}
+
+function logInsufficientCollateralDiagnostics(existingOrders, market, outcome, tokenId, details) {
+  const related = existingOrders
+    .filter(order => {
+      const marketIds = [order?.market?.id, order?.marketId, order?.order?.marketId].filter(value => value !== undefined && value !== null).map(String);
+      return marketIds.includes(String(market.id));
+    })
+    .slice(0, 10)
+    .map(order => ({
+      keys: Object.keys(order || {}),
+      orderKeys: Object.keys(order?.order || {}),
+      outcomeKeys: Object.keys(order?.outcome || {}),
+      id: getOrderId(order),
+      side: getOrderSide(order),
+      marketId: getOrderMarketId(order),
+      tokenId: getOrderTokenId(order),
+      outcomeId: getOrderOutcomeId(order),
+      price: getOrderPrice(order),
+      raw: order,
+    }));
+
+  console.log("🧪 余额不足诊断 marketId=" + market.id
+    + " outcome=" + outcome.name
+    + " tokenId=" + tokenId
+    + " request=" + safeJson(details, 2000)
+    + " sameMarketOpenOrders=" + safeJson(related, 7000));
+}
+
 function formatWei(value) {
   if (value === undefined || value === null) return "";
   const wei = BigInt(value);
@@ -670,6 +747,7 @@ async function getOpenOrders(throwOnError = false) {
 
     latestOpenOrders = orders;
     latestOpenOrdersFetchedAt = Date.now();
+    logOpenOrdersDiagnostics(orders);
     return orders;
   } catch (e) {
     if (throwOnError) throw e;
@@ -1567,6 +1645,7 @@ async function processMarket(market, amountWei, existingOrders) {
     const buyPrice = Number(priceWei) / 1e18;
     if (!predictAsk) {
       console.log("  ⏭️ 卖一为空，不符合积分点差条件 marketId=" + market.id + " outcome=" + outcome.name + " buy=" + buyPrice.toFixed(3) + " ask=null max=" + MAX_REWARD_SPREAD);
+      logOrderbookDiagnostics("predictAsk为空", market, outcome, predictBook);
       skipOrders++;
       continue;
     }
@@ -1618,6 +1697,7 @@ async function processMarket(market, amountWei, existingOrders) {
         : " marketId=" + market.id + " outcome=" + outcome.name;
       if (e.message.includes("insufficient")) {
         console.log("  ⚠️ 挂单失败 reason=余额不足" + detail);
+        logInsufficientCollateralDiagnostics(existingOrders, market, outcome, tokenId, e.details ?? { message: e.message });
       } else {
         console.log("  ❌ 挂单失败 error=" + e.message.slice(0, 100) + detail);
       }
