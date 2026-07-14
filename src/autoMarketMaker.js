@@ -125,6 +125,7 @@ let monitorRunning = false;
 let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
+let positionsResponseLogged = false;
 const closingPositions = new Set();
 const MIN_POSITION_CLOSE_QUANTITY_WEI = 1n * 10n ** 18n;
 let monitorLoopCount = 0;
@@ -772,7 +773,12 @@ async function getPositions() {
     const res = await fetch("https://api.predict.fun/v1/positions?first=100", {
       headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
     });
-    return (await res.json()).data || [];
+    const json = await res.json();
+    if (!positionsResponseLogged) {
+      positionsResponseLogged = true;
+      console.log("🔎 positions接口原始响应=" + JSON.stringify(json, (_, value) => typeof value === "bigint" ? value.toString() : value));
+    }
+    return json.data || [];
   } catch (e) { return []; }
 }
 

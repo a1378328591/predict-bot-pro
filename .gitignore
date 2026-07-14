@@ -17,3 +17,6 @@ assets/
 # logs
 *.log
 blockedMarkets.json
+
+# collected BTC market data
+data/btc/
