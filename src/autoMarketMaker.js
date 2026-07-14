@@ -692,6 +692,21 @@ function getBestPolymarketBid(book) {
   return best;
 }
 
+async function getPolymarketOutcomeBestBid(market, outcome) {
+  let bestBid = null;
+  for (const conditionId of market?.polymarketConditionIds || []) {
+    const polyMarket = await getPolymarketMarket(conditionId);
+    if (!polyMarket) continue;
+
+    const tokenId = findPolymarketTokenId(polyMarket, outcome);
+    if (!tokenId) continue;
+
+    const bid = getBestPolymarketBid(await getPolymarketBook(tokenId));
+    if (bid && (!bestBid || bid.price > bestBid.price)) bestBid = bid;
+  }
+  return bestBid;
+}
+
 async function getPolymarketQuote(market, outcome) {
   for (const conditionId of market.polymarketConditionIds || []) {
     const polyMarket = await getPolymarketMarket(conditionId);
