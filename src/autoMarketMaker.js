@@ -1226,15 +1226,35 @@ async function closeSinglePosition(pos, openOrders) {
 
     const buyPrice = getPositionBuyPrice(pos);
     console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
-    if (!buyPrice) {
+    const averageBuyPriceUsd = pos?.averageBuyPriceUsd;
+    const hasZeroAverageBuyPriceUsd = averageBuyPriceUsd !== undefined && averageBuyPriceUsd !== null && averageBuyPriceUsd !== "" && Number(averageBuyPriceUsd) === 0;
+    if (!buyPrice && !hasZeroAverageBuyPriceUsd) {
       console.log("⚠️ 无法识别持仓买入价，放弃平仓 marketId=" + marketId);
       return;
     }
 
-    const minSellPrice = Math.max(0.01, buyPrice - MAX_CLOSE_SLIPPAGE);
-    const book = await getPredictBook(marketId);
     const market = latestMarketsById.get(String(marketId)) ?? pos.market;
     const outcome = market?.outcomes?.find(item => String(item.onChainId) === String(tokenId)) ?? pos.outcome;
+    const book = await getPredictBook(marketId);
+    if (hasZeroAverageBuyPriceUsd) {
+      const predictBid = getBestPredictBidFromBook(book, market, outcome);
+      const polymarketBid = await getPolymarketOutcomeBestBid(market, outcome);
+      const sellPrice = Math.max(
+        Number.isFinite(predictBid) && predictBid > 0 ? predictBid : 0,
+        Number.isFinite(polymarketBid?.price) && polymarketBid.price > 0 ? polymarketBid.price : 0
+      );
+      if (!sellPrice) {
+        console.log("⚠️ 持仓成本价为0且 Predict/Polymarket 买一均为空，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
+        return;
+      }
+      const sellPriceWei = roundBuyPriceWei(sellPrice, market);
+      if (sellPriceWei <= 0n) return;
+      console.log("📤 持仓成本价为0，按 Predict/Polymarket 较高买一限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(quantityWei) / 1e18).toFixed(4) + " predictBid=" + (predictBid?.toFixed(6) ?? "null") + " polymarketBid=" + (polymarketBid?.price?.toFixed(6) ?? "null") + " sellPrice=" + (Number(sellPriceWei) / 1e18).toFixed(6));
+      await placeSellLimit(market, tokenId, sellPriceWei, quantityWei);
+      return;
+    }
+
+    const minSellPrice = Math.max(0.01, buyPrice - MAX_CLOSE_SLIPPAGE);
     const liquidity = getOutcomeSellLiquidity(book, market, outcome, minSellPrice);
     const quantity = Number(quantityWei) / 1e18;
     const orderValueUsd = quantity * minSellPrice;
