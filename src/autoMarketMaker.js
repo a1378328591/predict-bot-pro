@@ -399,9 +399,12 @@ function getPositionQuantityWei(pos) {
 }
 
 function getPositionBuyPrice(pos) {
+  const averageBuyPriceUsd = Number(pos?.averageBuyPriceUsd);
+  if (Number.isFinite(averageBuyPriceUsd) && averageBuyPriceUsd > 0 && averageBuyPriceUsd <= 1) return averageBuyPriceUsd;
+  if (Number.isFinite(averageBuyPriceUsd) && averageBuyPriceUsd > 1 && averageBuyPriceUsd <= 100) return averageBuyPriceUsd / 100;
+
   const candidates = [
     pos?.averagePrice,
-    pos?.averageBuyPriceUsd,
     pos?.averageEntryPrice,
     pos?.avgPrice,
     pos?.avgEntryPrice,
@@ -417,6 +420,31 @@ function getPositionBuyPrice(pos) {
   }
 
   return null;
+}
+
+function getPositionDebugInfo(pos) {
+  const priceFields = [
+    "averagePrice",
+    "averageBuyPriceUsd",
+    "averageEntryPrice",
+    "avgPrice",
+    "avgEntryPrice",
+    "entryPrice",
+    "entryPricePerShare",
+    "price",
+    "costBasisPrice",
+  ];
+  const scalarFields = Object.fromEntries(
+    Object.entries(pos || {}).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))
+  );
+  return {
+    scalarFields,
+    priceCandidates: Object.fromEntries(priceFields.map(field => [field, pos?.[field]])),
+    marketId: getPositionMarketId(pos),
+    tokenId: getPositionTokenId(pos),
+    quantityWei: getPositionQuantityWei(pos).toString(),
+    outcome: pos?.outcome,
+  };
 }
 
 async function initSDK() {
@@ -1191,6 +1219,7 @@ async function closeSinglePosition(pos, openOrders) {
     }
 
     const buyPrice = getPositionBuyPrice(pos);
+    console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
     if (!buyPrice) {
       console.log("⚠️ 无法识别持仓买入价，放弃平仓 marketId=" + marketId);
       return;
