@@ -43,6 +43,8 @@ const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
 const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
+const MIN_REWARD_SELL_SHARES = 100; // 卖单达到100份才有积分奖励
+const MIN_REWARD_SELL_QUANTITY_WEI = BigInt(MIN_REWARD_SELL_SHARES) * 10n ** 18n;
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
 const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按原逻辑退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
@@ -130,6 +132,7 @@ let startTimeRefreshRunning = false;
 let positionsResponseLogged = false;
 const closingPositions = new Set();
 const pendingCloseOrders = new Map();
+const lastRewardSellPositionQuantities = new Map();
 const MIN_POSITION_CLOSE_QUANTITY_WEI = 1n * 10n ** 18n;
 let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
@@ -1357,6 +1360,27 @@ function getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId) {
   });
 }
 
+async function resetPositionSellOrdersForUrgentClose(openOrders, marketId, tokenId, outcomeId, closeKey) {
+  const sellOrders = getOpenSellOrders(openOrders, marketId, tokenId, outcomeId);
+  const sellOrderIds = sellOrders.map(getOrderId).filter(Boolean);
+  if (sellOrderIds.length < sellOrders.length) {
+    console.log("⚠️ 紧急平仓发现无法识别ID的卖单，跳过重挂 marketId=" + marketId + " tokenId=" + tokenId);
+    return false;
+  }
+
+  if (sellOrderIds.length > 0) {
+    const cancelled = await cancelOrders(sellOrderIds, "开赛临近，撤当前持仓卖单后按买一全仓退出 marketId=" + marketId + " tokenId=" + tokenId);
+    if (cancelled < sellOrderIds.length) {
+      console.log("⚠️ 紧急平仓卖单未全部撤掉，等待下一轮 marketId=" + marketId + " tokenId=" + tokenId + " cancelled=" + cancelled + " total=" + sellOrderIds.length);
+      return false;
+    }
+    console.log("🧯 紧急平仓已撤当前持仓卖单 marketId=" + marketId + " tokenId=" + tokenId + " orders=" + cancelled);
+  }
+
+  pendingCloseOrders.delete(closeKey);
+  return true;
+}
+
 function rememberPendingCloseOrder(closeKey, order, quantityWei) {
   pendingCloseOrders.set(closeKey, { orderId: getOrderId(order), quantityWei, createdAt: Date.now() });
 }
@@ -1384,6 +1408,7 @@ async function closeSinglePosition(pos, openOrders) {
 
   const closeKey = String(marketId) + "-" + String(tokenId);
   if (closingPositions.has(closeKey)) return;
+  if (quantityWei < MIN_REWARD_SELL_QUANTITY_WEI) lastRewardSellPositionQuantities.delete(closeKey);
 
   try {
     closingPositions.add(closeKey);
@@ -1407,32 +1432,71 @@ async function closeSinglePosition(pos, openOrders) {
       }
     }
 
-    const sellCoverage = getOpenSellCoverage(openOrders, marketId, tokenId, outcomeId);
-    const pendingCloseOrder = getPendingCloseOrder(closeKey);
-    if (pendingCloseOrder) {
-      const pendingOrderVisible = pendingCloseOrder.orderId && sellCoverage.orders.some(order => String(getOrderId(order)) === String(pendingCloseOrder.orderId));
-      if (!pendingOrderVisible) {
-        console.log("⏳ 等待新卖单出现在OPEN后再计算补单 marketId=" + marketId + " tokenId=" + tokenId + " pendingQtyWei=" + pendingCloseOrder.quantityWei.toString());
+    const urgentCloseReason = getCloseUrgencyReason(market);
+    let closeQuantityWei;
+    if (urgentCloseReason) {
+      const reset = await resetPositionSellOrdersForUrgentClose(openOrders, marketId, tokenId, outcomeId, closeKey);
+      if (!reset) return;
+      lastRewardSellPositionQuantities.delete(closeKey);
+      closeQuantityWei = quantityWei;
+    } else {
+      let currentOpenOrders = openOrders;
+      const previousRewardSellPositionQuantityWei = lastRewardSellPositionQuantities.get(closeKey);
+      const positionChangedSinceRewardSell = previousRewardSellPositionQuantityWei === undefined || previousRewardSellPositionQuantityWei !== quantityWei;
+      if (quantityWei >= MIN_REWARD_SELL_QUANTITY_WEI && positionChangedSinceRewardSell) {
+        const smallSellOrders = getOpenSellOrders(currentOpenOrders, marketId, tokenId, outcomeId)
+          .filter(order => {
+            const orderQuantityWei = getOrderRemainingSellQuantityWei(order);
+            return orderQuantityWei && orderQuantityWei < MIN_REWARD_SELL_QUANTITY_WEI;
+          });
+        const smallSellOrderIds = smallSellOrders.map(getOrderId).filter(Boolean);
+
+        if (smallSellOrderIds.length < smallSellOrders.length) {
+          console.log("⚠️ 积分卖单整理发现无法识别ID的小卖单，等待下一轮 marketId=" + marketId + " tokenId=" + tokenId);
+          return;
+        }
+        if (smallSellOrderIds.length > 0) {
+          const cancelled = await cancelOrders(smallSellOrderIds, "持仓达到积分门槛，撤不足" + MIN_REWARD_SELL_SHARES + "份的卖单后合并重挂 marketId=" + marketId + " tokenId=" + tokenId);
+          if (cancelled < smallSellOrderIds.length) {
+            console.log("⚠️ 积分卖单整理未全部撤掉，等待下一轮 marketId=" + marketId + " tokenId=" + tokenId + " cancelled=" + cancelled + " total=" + smallSellOrderIds.length);
+            return;
+          }
+          const pendingCloseOrder = getPendingCloseOrder(closeKey);
+          if (pendingCloseOrder?.orderId && smallSellOrderIds.some(orderId => String(orderId) === String(pendingCloseOrder.orderId))) {
+            pendingCloseOrders.delete(closeKey);
+          }
+          currentOpenOrders = await getOpenOrders(true);
+          console.log("🧹 持仓达到积分门槛，已撤不足" + MIN_REWARD_SELL_SHARES + "份卖单并刷新OPEN marketId=" + marketId + " tokenId=" + tokenId + " orders=" + cancelled);
+        }
+      }
+
+      const sellCoverage = getOpenSellCoverage(currentOpenOrders, marketId, tokenId, outcomeId);
+      const pendingCloseOrder = getPendingCloseOrder(closeKey);
+      if (pendingCloseOrder) {
+        const pendingOrderVisible = pendingCloseOrder.orderId && sellCoverage.orders.some(order => String(getOrderId(order)) === String(pendingCloseOrder.orderId));
+        if (!pendingOrderVisible) {
+          console.log("⏳ 等待新卖单出现在OPEN后再计算补单 marketId=" + marketId + " tokenId=" + tokenId + " pendingQtyWei=" + pendingCloseOrder.quantityWei.toString());
+          return;
+        }
+        pendingCloseOrders.delete(closeKey);
+      }
+
+      if (sellCoverage.quantityWei === null) {
+        console.log("⚠️ 无法识别现有卖单剩余份额，为避免重复卖出而跳过补单 marketId=" + marketId + " tokenId=" + tokenId + " orderId=" + (sellCoverage.unknownOrderId || "unknown"));
         return;
       }
-      pendingCloseOrders.delete(closeKey);
+
+      closeQuantityWei = quantityWei - sellCoverage.quantityWei;
+      if (sellCoverage.quantityWei > 0n && closeQuantityWei > 0n) {
+        console.log("📤 现有卖单覆盖部分持仓，补挂差额 marketId=" + marketId + " tokenId=" + tokenId + " positionWei=" + quantityWei.toString() + " listedWei=" + sellCoverage.quantityWei.toString() + " remainingWei=" + closeQuantityWei.toString());
+      }
     }
 
-    if (sellCoverage.quantityWei === null) {
-      console.log("⚠️ 无法识别现有卖单剩余份额，为避免重复卖出而跳过补单 marketId=" + marketId + " tokenId=" + tokenId + " orderId=" + (sellCoverage.unknownOrderId || "unknown"));
-      return;
-    }
-
-    const closeQuantityWei = quantityWei - sellCoverage.quantityWei;
     if (closeQuantityWei <= 0n) return;
     if (closeQuantityWei < MIN_POSITION_CLOSE_QUANTITY_WEI) {
       console.log("⏭️ 待补卖差额小于1份，保留尾差避免最小下单/精度错误 marketId=" + marketId + " tokenId=" + tokenId + " remainingWei=" + closeQuantityWei.toString());
       return;
     }
-    if (sellCoverage.quantityWei > 0n) {
-      console.log("📤 现有卖单覆盖部分持仓，补挂差额 marketId=" + marketId + " tokenId=" + tokenId + " positionWei=" + quantityWei.toString() + " listedWei=" + sellCoverage.quantityWei.toString() + " remainingWei=" + closeQuantityWei.toString());
-    }
-
     const buyPrice = getPositionBuyPrice(pos);
     console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
     const averageBuyPriceUsd = pos?.averageBuyPriceUsd;
@@ -1443,21 +1507,15 @@ async function closeSinglePosition(pos, openOrders) {
     }
 
     const book = await getPredictBook(marketId);
-    const urgentCloseReason = getCloseUrgencyReason(market);
     if (urgentCloseReason && hasZeroAverageBuyPriceUsd) {
       const predictBid = getBestPredictBidFromBook(book, market, outcome);
-      const polymarketBid = await getPolymarketOutcomeBestBid(market, outcome);
-      const sellPrice = Math.max(
-        Number.isFinite(predictBid) && predictBid > 0 ? predictBid : 0,
-        Number.isFinite(polymarketBid?.price) && polymarketBid.price > 0 ? polymarketBid.price : 0
-      );
-      if (!sellPrice) {
-        console.log("⚠️ 持仓成本价为0且 Predict/Polymarket 买一均为空，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
+      if (!predictBid || predictBid <= 0) {
+        console.log("⚠️ 紧急平仓成本价为0但 Predict 买一为空，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
         return;
       }
-      const sellPriceWei = roundBuyPriceWei(sellPrice, market);
+      const sellPriceWei = roundBuyPriceWei(predictBid, market);
       if (sellPriceWei <= 0n) return;
-      console.log("📤 紧急平仓成本价为0，按 Predict/Polymarket 较高买一限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " reason=" + urgentCloseReason + " predictBid=" + (predictBid?.toFixed(6) ?? "null") + " polymarketBid=" + (polymarketBid?.price?.toFixed(6) ?? "null") + " sellPrice=" + (Number(sellPriceWei) / 1e18).toFixed(6));
+      console.log("📤 紧急平仓成本价为0，按 Predict 买一全仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " reason=" + urgentCloseReason + " predictBid=" + predictBid.toFixed(6) + " sellPrice=" + (Number(sellPriceWei) / 1e18).toFixed(6));
       const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
       rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
       return;
@@ -1465,26 +1523,20 @@ async function closeSinglePosition(pos, openOrders) {
 
     if (urgentCloseReason) {
       const minSellPrice = Math.max(0.01, buyPrice - MAX_CLOSE_SLIPPAGE);
-      const liquidity = getOutcomeSellLiquidity(book, market, outcome, minSellPrice);
-      const quantity = Number(closeQuantityWei) / 1e18;
-      const orderValueUsd = quantity * minSellPrice;
-
-      if (!liquidity.bestPrice || liquidity.size < quantity) {
-        console.log("⚠️ 紧急平仓流动性不足 marketId=" + marketId + " need=" + quantity.toFixed(4) + " have=" + liquidity.size.toFixed(4) + " min=" + minSellPrice.toFixed(3) + " reason=" + urgentCloseReason);
+      const predictBid = getBestPredictBidFromBook(book, market, outcome);
+      if (!predictBid || predictBid < minSellPrice) {
+        console.log("⚠️ 紧急平仓买一低于最大允许滑点，放弃平仓 marketId=" + marketId + " bid=" + (predictBid?.toFixed(6) ?? "null") + " minSell=" + minSellPrice.toFixed(6) + " reason=" + urgentCloseReason);
         return;
       }
 
-      if (orderValueUsd < MIN_ORDER_VALUE_USD) {
-        const marketBook = getOutcomeMarketBook(book, market, outcome);
-        console.log("📤 紧急小额持仓市价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " minSell=" + minSellPrice.toFixed(3) + " value=" + orderValueUsd.toFixed(4) + " minValue=" + MIN_ORDER_VALUE_USD + " bestBid=" + liquidity.bestPrice + " reason=" + urgentCloseReason);
-        const sellOrder = await placeSellMarketSmall(market, tokenId, closeQuantityWei, marketBook);
-        rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
-        return;
-      }
-
-      const sellPriceWei = roundSellPriceWei(minSellPrice, market);
+      const sellPriceWei = roundBuyPriceWei(predictBid, market);
       if (sellPriceWei <= 0n) return;
-      console.log("📤 紧急平仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buy=" + buyPrice.toFixed(3) + " minSell=" + minSellPrice.toFixed(3) + " bestBid=" + liquidity.bestPrice + " reason=" + urgentCloseReason);
+      const sellPrice = Number(sellPriceWei) / 1e18;
+      if (sellPrice < minSellPrice) {
+        console.log("⚠️ 紧急平仓买一按价格精度取整后低于最大允许滑点，放弃平仓 marketId=" + marketId + " bid=" + predictBid.toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " minSell=" + minSellPrice.toFixed(6) + " reason=" + urgentCloseReason);
+        return;
+      }
+      console.log("📤 紧急平仓按买一全仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " buy=" + buyPrice.toFixed(6) + " minSell=" + minSellPrice.toFixed(6) + " bestBid=" + predictBid.toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + urgentCloseReason);
       const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
       rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
       return;
@@ -1510,6 +1562,9 @@ async function closeSinglePosition(pos, openOrders) {
     console.log("📤 非紧急持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
     const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
     rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
+    if (quantityWei >= MIN_REWARD_SELL_QUANTITY_WEI) {
+      lastRewardSellPositionQuantities.set(closeKey, quantityWei);
+    }
   } catch (e) {
     console.log("⚠️ 平仓异常 marketId=" + marketId + ":", e.message);
   } finally {
