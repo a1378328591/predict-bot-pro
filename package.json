@@ -7,6 +7,8 @@
   "scripts": {
     "market-maker": "node src/autoMarketMaker.js",
     "collect:btc": "node src/btc/collectBtcSamples.js",
+    "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
+    "reconcile:btc:z": "node src/btc/reconcileZScorePaperSignals.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

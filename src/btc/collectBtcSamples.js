@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { estimateTakerBuyCost, estimateTakerSellProceeds } from "./predictTakerFee.js";
 
 const API_BASE_URL = process.env.PREDICT_API_BASE_URL || "https://api.predict.fun";
 const API_KEY = process.env.PREDICT_API_KEY;
@@ -195,13 +196,11 @@ function outcomeBook(book, market, outcome) {
   return { bids, asks, representation: "direct_book" };
 }
 
-function summarizeBook(book, feeRateBps) {
+function summarizeBook(book) {
   const bestBid = book.bids[0] ?? null;
   const bestAsk = book.asks[0] ?? null;
   const spread = bestBid && bestAsk ? bestAsk.price - bestBid.price : null;
   const mid = bestBid && bestAsk ? (bestBid.price + bestAsk.price) / 2 : null;
-  const feeRate = Number.isFinite(Number(feeRateBps)) ? Number(feeRateBps) / 10_000 : null;
-
   return {
     representation: book.representation,
     best_bid: bestBid,
@@ -212,13 +211,13 @@ function summarizeBook(book, feeRateBps) {
     ask_depth_shares: book.asks.reduce((total, level) => total + level.size, 0),
     bid_depth_usd: book.bids.reduce((total, level) => total + level.price * level.size, 0),
     ask_depth_usd: book.asks.reduce((total, level) => total + level.price * level.size, 0),
-    buy_vwap: DEPTH_NOTIONALS_USD.map(notional => walkBuyBook(book.asks, notional, feeRate)),
-    sell_vwap: DEPTH_NOTIONALS_USD.map(notional => walkSellBook(book.bids, notional, feeRate)),
+    buy_vwap: DEPTH_NOTIONALS_USD.map(notional => walkBuyBook(book.asks, notional)),
+    sell_vwap: DEPTH_NOTIONALS_USD.map(notional => walkSellBook(book.bids, notional)),
     levels: { bids: book.bids, asks: book.asks },
   };
 }
 
-function walkBuyBook(asks, targetNotional, feeRate) {
+function walkBuyBook(asks, targetNotional) {
   let spent = 0;
   let shares = 0;
   for (const level of asks) {
@@ -229,19 +228,19 @@ function walkBuyBook(asks, targetNotional, feeRate) {
     shares += cost / level.price;
   }
   const filled = spent >= targetNotional - 1e-9;
-  const feeEstimate = feeRate === null ? null : spent * feeRate;
+  const costs = estimateTakerBuyCost(shares > 0 ? spent / shares : 0, shares, spent);
   return {
     target_notional_usd: targetNotional,
     filled_notional_usd: spent,
     filled_shares: shares,
     fully_filled: filled,
     vwap: shares > 0 ? spent / shares : null,
-    estimated_linear_fee_usd: feeEstimate,
-    estimated_total_cost_usd: feeEstimate === null ? null : spent + feeEstimate,
+    estimated_taker_fee_usd: costs.taker_fee_usd,
+    estimated_total_cost_usd: costs.total_cost_usd,
   };
 }
 
-function walkSellBook(bids, targetNotional, feeRate) {
+function walkSellBook(bids, targetNotional) {
   let proceeds = 0;
   let shares = 0;
   for (const level of bids) {
@@ -252,15 +251,15 @@ function walkSellBook(bids, targetNotional, feeRate) {
     shares += value / level.price;
   }
   const filled = proceeds >= targetNotional - 1e-9;
-  const feeEstimate = feeRate === null ? null : proceeds * feeRate;
+  const costs = estimateTakerSellProceeds(shares > 0 ? proceeds / shares : 0, shares, proceeds);
   return {
     target_notional_usd: targetNotional,
     filled_notional_usd: proceeds,
     filled_shares: shares,
     fully_filled: filled,
     vwap: shares > 0 ? proceeds / shares : null,
-    estimated_linear_fee_usd: feeEstimate,
-    estimated_net_proceeds_usd: feeEstimate === null ? null : proceeds - feeEstimate,
+    estimated_taker_fee_usd: costs.taker_fee_usd,
+    estimated_net_proceeds_usd: costs.net_proceeds_usd,
   };
 }
 
@@ -387,7 +386,7 @@ async function snapshotCategory(item, reference) {
           outcome_name: outcome.name ?? null,
           outcome_on_chain_id: outcome.onChainId ?? null,
           outcome_status: outcome.status ?? null,
-          book: summarizeBook(sidedBook, market.feeRateBps),
+          book: summarizeBook(sidedBook),
         };
       });
 
