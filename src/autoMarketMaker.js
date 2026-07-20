@@ -386,6 +386,75 @@ function getOrderPrice(order) {
   return null;
 }
 
+function parseShareQuantityWei(value, rawWei = false) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "bigint") return value > 0n ? value : null;
+
+  const text = String(value).trim();
+  if (rawWei) {
+    return /^\d+$/.test(text) && BigInt(text) > 0n ? BigInt(text) : null;
+  }
+
+  const match = text.match(/^(\d+)(?:\.(\d+))?$/);
+  if (!match) return null;
+  const wholeWei = BigInt(match[1]) * 10n ** 18n;
+  const fraction = (match[2] || "").slice(0, 18).padEnd(18, "0");
+  const fractionWei = BigInt(fraction || "0");
+  const quantityWei = wholeWei + fractionWei;
+  return quantityWei > 0n ? quantityWei : null;
+}
+
+function parseOrderQuantityWei(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const text = String(value).trim();
+  if (/^\d+$/.test(text) && text.length > 9) return parseShareQuantityWei(text, true);
+  return parseShareQuantityWei(text);
+}
+
+function getOrderRemainingSellQuantityWei(order) {
+  const rawRemainingCandidates = [
+    order?.remainingQuantityWei,
+    order?.remainingMakerAmount,
+    order?.remainingMakerAmountWei,
+    order?.order?.remainingQuantityWei,
+    order?.order?.remainingMakerAmount,
+    order?.order?.remainingMakerAmountWei,
+  ];
+  for (const value of rawRemainingCandidates) {
+    const quantityWei = parseShareQuantityWei(value, true);
+    if (quantityWei) return quantityWei;
+  }
+
+  const remainingQuantityCandidates = [
+    order?.remainingQuantity,
+    order?.remainingShares,
+    order?.remainingSize,
+    order?.order?.remainingQuantity,
+    order?.order?.remainingShares,
+    order?.order?.remainingSize,
+    order?.quantity,
+    order?.quantityWei,
+    order?.size,
+    order?.shares,
+    order?.order?.quantity,
+    order?.order?.quantityWei,
+    order?.order?.size,
+    order?.order?.shares,
+  ];
+  for (const value of remainingQuantityCandidates) {
+    const quantityWei = parseOrderQuantityWei(value);
+    if (quantityWei) return quantityWei;
+  }
+
+  const makerAmountCandidates = [order?.order?.makerAmount, order?.makerAmount];
+  for (const value of makerAmountCandidates) {
+    const quantityWei = parseShareQuantityWei(value, true);
+    if (quantityWei) return quantityWei;
+  }
+
+  return null;
+}
+
 function getPositionMarketId(pos) {
   return pos?.market?.id ?? pos?.marketId;
 }
@@ -1255,13 +1324,28 @@ async function rememberFilledMarkets() {
   } catch (e) {}
 }
 
-function getOpenSellOrder(openOrders, marketId, tokenId, outcomeId) {
-  return openOrders.find(order => {
+function getOpenSellOrders(openOrders, marketId, tokenId, outcomeId) {
+  return openOrders.filter(order => {
     if (getOrderSide(order) !== "SELL" || String(getOrderMarketId(order)) !== String(marketId)) return false;
     const orderTokenId = getOrderTokenId(order);
     const orderOutcomeId = getOrderOutcomeId(order);
     return (orderTokenId && String(orderTokenId) === String(tokenId)) || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
   });
+}
+
+function getOpenSellCoverage(openOrders, marketId, tokenId, outcomeId) {
+  const orders = getOpenSellOrders(openOrders, marketId, tokenId, outcomeId);
+  let quantityWei = 0n;
+
+  for (const order of orders) {
+    const orderQuantityWei = getOrderRemainingSellQuantityWei(order);
+    if (!orderQuantityWei) {
+      return { orders, quantityWei: null, unknownOrderId: getOrderId(order) };
+    }
+    quantityWei += orderQuantityWei;
+  }
+
+  return { orders, quantityWei, unknownOrderId: null };
 }
 
 function getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId) {
@@ -1273,8 +1357,8 @@ function getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId) {
   });
 }
 
-function rememberPendingCloseOrder(closeKey, quantityWei) {
-  pendingCloseOrders.set(closeKey, { quantityWei, createdAt: Date.now() });
+function rememberPendingCloseOrder(closeKey, order, quantityWei) {
+  pendingCloseOrders.set(closeKey, { orderId: getOrderId(order), quantityWei, createdAt: Date.now() });
 }
 
 function getPendingCloseOrder(closeKey) {
@@ -1323,14 +1407,31 @@ async function closeSinglePosition(pos, openOrders) {
       }
     }
 
-    if (getOpenSellOrder(openOrders, marketId, tokenId, outcomeId)) {
-      console.log("📤 已有卖单，跳过重复平仓 marketId=" + marketId);
+    const sellCoverage = getOpenSellCoverage(openOrders, marketId, tokenId, outcomeId);
+    const pendingCloseOrder = getPendingCloseOrder(closeKey);
+    if (pendingCloseOrder) {
+      const pendingOrderVisible = pendingCloseOrder.orderId && sellCoverage.orders.some(order => String(getOrderId(order)) === String(pendingCloseOrder.orderId));
+      if (!pendingOrderVisible) {
+        console.log("⏳ 等待新卖单出现在OPEN后再计算补单 marketId=" + marketId + " tokenId=" + tokenId + " pendingQtyWei=" + pendingCloseOrder.quantityWei.toString());
+        return;
+      }
+      pendingCloseOrders.delete(closeKey);
+    }
+
+    if (sellCoverage.quantityWei === null) {
+      console.log("⚠️ 无法识别现有卖单剩余份额，为避免重复卖出而跳过补单 marketId=" + marketId + " tokenId=" + tokenId + " orderId=" + (sellCoverage.unknownOrderId || "unknown"));
       return;
     }
 
-    const pendingCloseOrder = getPendingCloseOrder(closeKey);
-    const closeQuantityWei = quantityWei - (pendingCloseOrder?.quantityWei ?? 0n);
+    const closeQuantityWei = quantityWei - sellCoverage.quantityWei;
     if (closeQuantityWei <= 0n) return;
+    if (closeQuantityWei < MIN_POSITION_CLOSE_QUANTITY_WEI) {
+      console.log("⏭️ 待补卖差额小于1份，保留尾差避免最小下单/精度错误 marketId=" + marketId + " tokenId=" + tokenId + " remainingWei=" + closeQuantityWei.toString());
+      return;
+    }
+    if (sellCoverage.quantityWei > 0n) {
+      console.log("📤 现有卖单覆盖部分持仓，补挂差额 marketId=" + marketId + " tokenId=" + tokenId + " positionWei=" + quantityWei.toString() + " listedWei=" + sellCoverage.quantityWei.toString() + " remainingWei=" + closeQuantityWei.toString());
+    }
 
     const buyPrice = getPositionBuyPrice(pos);
     console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
@@ -1357,8 +1458,8 @@ async function closeSinglePosition(pos, openOrders) {
       const sellPriceWei = roundBuyPriceWei(sellPrice, market);
       if (sellPriceWei <= 0n) return;
       console.log("📤 紧急平仓成本价为0，按 Predict/Polymarket 较高买一限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " reason=" + urgentCloseReason + " predictBid=" + (predictBid?.toFixed(6) ?? "null") + " polymarketBid=" + (polymarketBid?.price?.toFixed(6) ?? "null") + " sellPrice=" + (Number(sellPriceWei) / 1e18).toFixed(6));
-      await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
-      rememberPendingCloseOrder(closeKey, closeQuantityWei);
+      const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
+      rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
       return;
     }
 
@@ -1376,16 +1477,16 @@ async function closeSinglePosition(pos, openOrders) {
       if (orderValueUsd < MIN_ORDER_VALUE_USD) {
         const marketBook = getOutcomeMarketBook(book, market, outcome);
         console.log("📤 紧急小额持仓市价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " minSell=" + minSellPrice.toFixed(3) + " value=" + orderValueUsd.toFixed(4) + " minValue=" + MIN_ORDER_VALUE_USD + " bestBid=" + liquidity.bestPrice + " reason=" + urgentCloseReason);
-        await placeSellMarketSmall(market, tokenId, closeQuantityWei, marketBook);
-        rememberPendingCloseOrder(closeKey, closeQuantityWei);
+        const sellOrder = await placeSellMarketSmall(market, tokenId, closeQuantityWei, marketBook);
+        rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
         return;
       }
 
       const sellPriceWei = roundSellPriceWei(minSellPrice, market);
       if (sellPriceWei <= 0n) return;
       console.log("📤 紧急平仓限价卖 marketId=" + marketId + " qty=" + quantity.toFixed(4) + " buy=" + buyPrice.toFixed(3) + " minSell=" + minSellPrice.toFixed(3) + " bestBid=" + liquidity.bestPrice + " reason=" + urgentCloseReason);
-      await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
-      rememberPendingCloseOrder(closeKey, closeQuantityWei);
+      const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
+      rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
       return;
     }
 
@@ -1407,8 +1508,8 @@ async function closeSinglePosition(pos, openOrders) {
     }
 
     console.log("📤 非紧急持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + (Number(closeQuantityWei) / 1e18).toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
-    await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
-    rememberPendingCloseOrder(closeKey, closeQuantityWei);
+    const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, closeQuantityWei);
+    rememberPendingCloseOrder(closeKey, sellOrder, closeQuantityWei);
   } catch (e) {
     console.log("⚠️ 平仓异常 marketId=" + marketId + ":", e.message);
   } finally {
