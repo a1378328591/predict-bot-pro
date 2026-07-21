@@ -386,6 +386,7 @@ function getOrderPrice(order) {
   const makerAmount = Number(order?.order?.makerAmount ?? order?.makerAmount);
   const takerAmount = Number(order?.order?.takerAmount ?? order?.takerAmount);
   if (Number.isFinite(makerAmount) && Number.isFinite(takerAmount) && makerAmount > 0 && takerAmount > 0) {
+    if (getOrderSide(order) === "SELL") return takerAmount / makerAmount;
     return makerAmount / takerAmount;
   }
 
