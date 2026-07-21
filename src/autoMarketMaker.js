@@ -43,6 +43,8 @@ const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
 const MIN_ORDER_VALUE_USD = 1; // Predict 最小下单金额
+const MIN_BUY_SHARES = 100; // 本次买单份额低于100不挂，等于100可挂
+const SELL_ORDER_REPRICE_THRESHOLD = 0.01; // 卖单高于成本、且买一低于成本至少1个点时撤单重挂
 const MIN_REWARD_SELL_SHARES = 100; // 卖单达到100份才有积分奖励
 const MIN_REWARD_SELL_QUANTITY_WEI = BigInt(MIN_REWARD_SELL_SHARES) * 10n ** 18n;
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
@@ -118,6 +120,7 @@ const polyMarketCache = new Map();
 const categoryCache = new Map();
 const trackedOrders = new Map();
 const cancelingOrders = new Set();
+const cancelledStaleSellOrderIds = new Set();
 const blockedMarkets = loadBlockedMarkets();
 const latestMarketsById = new Map();
 let latestActiveRewardMarketIds = new Set();
@@ -468,6 +471,13 @@ function getPositionTokenId(pos) {
 
 function getPositionOutcomeId(pos) {
   return pos?.outcome?.id ?? pos?.outcomeId;
+}
+
+function getPositionForMarketAndToken(positions, marketId, tokenId) {
+  return positions.find(pos =>
+    String(getPositionMarketId(pos)) === String(marketId)
+    && String(getPositionTokenId(pos)) === String(tokenId)
+  );
 }
 
 function getPositionQuantityWei(pos) {
@@ -884,7 +894,7 @@ async function getPositions() {
 // 取消订单
 async function cancelOrder(orderId, reason) {
   const key = String(orderId);
-  if (cancelingOrders.has(key)) return;
+  if (cancelingOrders.has(key)) return false;
   cancelingOrders.add(key);
   try {
     const jwt = await getJwtTokenWithSDK();
@@ -901,9 +911,11 @@ async function cancelOrder(orderId, reason) {
     logElapsed("撤单请求", startedAt, "orderId=" + orderId + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 已撤单:", orderId, reason || "");
+    return true;
   } catch (e) {
     cancelingOrders.delete(key);
     console.log("⚠️ 撤单失败:", orderId, reason || "", e.message);
+    return false;
   }
 }
 
@@ -1324,7 +1336,10 @@ async function rememberFilledMarkets() {
         blockMarket(marketId, "检测到持仓，疑似被塞订单");
       }
     }
-  } catch (e) {}
+    return positions;
+  } catch (e) {
+    return [];
+  }
 }
 
 function getOpenSellOrders(openOrders, marketId, tokenId, outcomeId) {
@@ -1637,7 +1652,7 @@ function detectFilledTrackedOrders(openOrders, openOrdersFetchedAt = 0) {
   }
 }
 
-async function monitorSingleOrder(order, openOrders, predictBidCache) {
+async function monitorSingleOrder(order, openOrders, predictBidCache, positions) {
   const orderId = getOrderId(order);
   const marketId = getOrderMarketId(order);
   const tokenId = getOrderTokenId(order);
@@ -1649,8 +1664,40 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     const orderSide = getOrderSide(order);
     const orderPrice = getOrderPrice(order);
 
-    // 卖单一旦挂出必须保留队列位置，所有撤单风控只处理买单。
-    if (orderSide === "SELL") return;
+    if (orderSide === "SELL") {
+      if (cancelledStaleSellOrderIds.has(String(orderId))) return;
+
+      const position = getPositionForMarketAndToken(positions, marketId, tokenId);
+      const buyPrice = getPositionBuyPrice(position);
+      const outcome = market?.outcomes?.find(o => String(o.onChainId) === String(tokenId)) ?? order.outcome;
+      if (!market || !orderPrice || !buyPrice || !outcome) return;
+
+      const predictBidCacheKey = String(marketId) + "-" + String(tokenId);
+      let predictBidPromise = predictBidCache.get(predictBidCacheKey);
+      if (!predictBidPromise) {
+        predictBidPromise = getBestBid(marketId, market, outcome);
+        predictBidCache.set(predictBidCacheKey, predictBidPromise);
+      }
+      const predictBid = await predictBidPromise;
+      if (!predictBid) return;
+
+      const sellPremium = orderPrice - buyPrice;
+      const bidDrawdown = buyPrice - Number(predictBid);
+      if (
+        sellPremium < SELL_ORDER_REPRICE_THRESHOLD - 1e-9
+        || bidDrawdown < SELL_ORDER_REPRICE_THRESHOLD - 1e-9
+      ) return;
+
+      const reason = "卖单高于成本且买一低于成本至少1点，撤单后由持仓监控按成本价重挂"
+        + " marketId=" + marketId
+        + " tokenId=" + tokenId
+        + " orderPrice=" + orderPrice.toFixed(6)
+        + " buyPrice=" + buyPrice.toFixed(6)
+        + " predictBid=" + Number(predictBid).toFixed(6);
+      const cancelled = await cancelOrder(orderId, reason);
+      if (cancelled) cancelledStaleSellOrderIds.add(String(orderId));
+      return;
+    }
 
     const blockedReason = await getBlockedMarketReason(market ?? order.market);
     if (blockedReason) {
@@ -1763,11 +1810,11 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
   }
 }
 
-async function monitorOpenOrders(openOrders, openOrdersFetchedAt = 0) {
+async function monitorOpenOrders(openOrders, openOrdersFetchedAt = 0, positions = []) {
   try {
     detectFilledTrackedOrders(openOrders, openOrdersFetchedAt);
     const predictBidCache = new Map();
-    await Promise.allSettled(openOrders.map(order => monitorSingleOrder(order, openOrders, predictBidCache)));
+    await Promise.allSettled(openOrders.map(order => monitorSingleOrder(order, openOrders, predictBidCache, positions)));
   } catch (e) {
     console.log("⚠️ 监控总异常:", e.message);
   }
@@ -1794,12 +1841,12 @@ async function monitorLoop() {
       }
       const openOrdersFetchedAt = latestOpenOrdersFetchedAt;
       openOrdersCount = openOrders.length;
-      await rememberFilledMarkets();
+      const positions = await rememberFilledMarkets();
       monitorLoopCount++;
       if (monitorLoopCount % 10 === 1) {
         console.log("🛰️ 挂单监控运行中 openOrders=" + openOrders.length + " tracked=" + trackedOrders.size + " blocked=" + blockedMarkets.size);
       }
-      await monitorOpenOrders(openOrders, openOrdersFetchedAt);
+      await monitorOpenOrders(openOrders, openOrdersFetchedAt, positions);
     } catch (e) {
       console.log("⚠️ 高频监控异常:", e.message);
     } finally {
@@ -1997,6 +2044,12 @@ async function processMarket(market, amountWei, existingOrders) {
     }
 
     if (predictBid && Number(predictBid) - polyQuote.price > PRICE_TOLERANCE) {
+      skipOrders++;
+      continue;
+    }
+
+    const quantity = Number(amountWei) / 1e18 / buyPrice;
+    if (quantity < MIN_BUY_SHARES) {
       skipOrders++;
       continue;
     }
