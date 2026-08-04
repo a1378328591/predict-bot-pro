@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "market-maker": "node src/autoMarketMaker.js",
+    "monitor:temperature": "node src/temperature/monitorShanghaiHighTemperature.js",
     "collect:btc": "node src/btc/collectBtcSamples.js",
     "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
+    "execute:btc:z": "node src/btc/zScoreOrderExecutor.js",
     "reconcile:btc:z": "node src/btc/reconcileZScorePaperSignals.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -18,6 +20,7 @@
     "@predictdotfun/sdk": "^1.3.2",
     "dotenv": "^17.4.2",
     "ethers": "^6.16.0",
+    "https-proxy-agent": "^7.0.6",
     "node-fetch": "^2.7.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"

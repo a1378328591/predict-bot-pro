@@ -27,9 +27,9 @@ console.error = (...args) => {
 
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
-const MAX_ORDER_USD = 800; // 单笔买单最多使用金额
+const MAX_ORDER_USD = 400; // 单笔买单最多使用金额
 const CHECK_INTERVAL_MS = 3 * 60_000; // 3分钟执行一轮挂单
-const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
+const HOURLY_CANCEL_INTERVAL_MS = 20 * 60_000; // 每20分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
@@ -37,8 +37,9 @@ const MARKET_DELAY_MS = 100; // 每个市场之间等待100ms
 const OUTCOME_DELAY_MS = 50; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
 const MIN_BUY_PRICE = 0.30; // 价格低于30不挂买单
-const POLY_MIN_BID_USD = 100; // Polymarket 买一金额低于该值不挂/撤单
-const MIN_REWARD_HOURLY_RATE = 30; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
+const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
+const MAX_POLYMARKET_LEAGUE_TIER = 3; // PM 返回 leagueTier 时，仅挂小于等于该等级的赛事；设为0则不限制
+const MIN_REWARD_HOURLY_RATE = 20; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
 const MAX_REWARD_SPREAD = 0.06; // PR积分要求买一/卖一点差不超过6个点
 const MAX_CLOSE_SLIPPAGE = 0.03; // 平仓最多接受3个价差
@@ -48,7 +49,7 @@ const SELL_ORDER_REPRICE_THRESHOLD = 0.01; // 卖单高于成本、且买一低�
 const MIN_REWARD_SELL_SHARES = 100; // 卖单达到100份才有积分奖励
 const MIN_REWARD_SELL_QUANTITY_WEI = BigInt(MIN_REWARD_SELL_SHARES) * 10n ** 18n;
 const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
-const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按原逻辑退出，允许亏损
+const CLOSE_BEFORE_START_MS = 1 * 60 * 1000; // 开赛前20分钟持仓按原逻辑退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
@@ -679,6 +680,13 @@ function getPolymarketStartAt(polyMarket) {
   ]);
 }
 
+function getPolymarketLeagueTier(polyMarket) {
+  const value = polyMarket?.events?.[0]?.eventMetadata?.leagueTier;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const tier = Number(value);
+  return Number.isInteger(tier) && tier > 0 ? tier : null;
+}
+
 function getPredictStartAt(market) {
   return getFirstValidDate([
     market?.gameStartTime,
@@ -806,6 +814,11 @@ async function getPolymarketQuote(market, outcome) {
   for (const conditionId of market.polymarketConditionIds || []) {
     const polyMarket = await getPolymarketMarket(conditionId);
     if (!polyMarket) continue;
+
+    const leagueTier = getPolymarketLeagueTier(polyMarket);
+    if (MAX_POLYMARKET_LEAGUE_TIER > 0 && leagueTier !== null && leagueTier > MAX_POLYMARKET_LEAGUE_TIER) {
+      return { ok: false, reason: "PM赛事等级不符合 leagueTier=" + leagueTier + " max=" + MAX_POLYMARKET_LEAGUE_TIER };
+    }
 
     const startsAt = getPolymarketStartAt(polyMarket);
     rememberMarketStart(market.id, startsAt, "Polymarket", conditionId);

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Predict Market Redesign</title>
+  <style>
+    :root { --ink:#172033; --muted:#687386; --line:#e6e9ef; --paper:#fff; --bg:#f6f7fb; --purple:#6d4aff; --purple-soft:#f0edff; --blue:#3378ed; --blue-soft:#edf4ff; --red:#e45863; --red-soft:#fff0f1; --green:#0d9e62; --amber:#b77900; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--bg); font:14px/1.35 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button { font:inherit; cursor:pointer; }
+    .topbar { height:64px; display:flex; align-items:center; gap:28px; padding:0 max(24px, calc((100vw - 1440px)/2)); background:#fff; border-bottom:1px solid var(--line); }
+    .brand { font-size:23px; font-weight:900; letter-spacing:-1.5px; }
+    .brand i { color:var(--purple); font-style:normal; }
+    .nav { display:flex; gap:22px; color:#566176; }
+    .nav .active { color:var(--purple); font-weight:750; }
+    .search { width:260px; margin-left:8px; padding:10px 13px; color:#9aa3b1; background:#f4f5f8; border:0; border-radius:8px; }
+    .wallet { margin-left:auto; display:flex; align-items:center; gap:20px; color:var(--muted); font-size:12px; }
+    .wallet strong { display:block; color:var(--ink); font-size:14px; }
+    .deposit { padding:9px 16px; border:0; border-radius:8px; color:#fff; background:var(--purple); font-weight:750; }
+    .page { max-width:1440px; margin:0 auto; padding:24px; }
+    .crumb { color:var(--muted); font-size:12px; margin-bottom:18px; }
+    .market-head { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:0 0 22px; }
+    .title-block { display:flex; align-items:center; gap:14px; }
+    .league { width:42px; height:42px; display:grid; place-items:center; border-radius:9px; color:#e6c96d; background:#172a25; font-size:10px; font-weight:900; text-align:center; }
+    h1 { margin:0; font-size:22px; letter-spacing:-.3px; }
+    .sub { margin-top:4px; color:var(--muted); }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; margin-left:8px; border-radius:99px; color:var(--purple); background:var(--purple-soft); font-size:12px; font-weight:750; }
+    .event-meta { display:flex; gap:27px; text-align:right; }
+    .event-meta span { display:block; color:var(--muted); font-size:12px; }
+    .event-meta strong { display:block; margin-top:3px; }
+    .live-dot { display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%; background:#ef505b; }
+    .trading-layout { display:grid; grid-template-columns:minmax(420px, 1.15fr) minmax(400px, 1fr) 330px; gap:16px; align-items:start; }
+    .panel { background:var(--paper); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    .panel-head { display:flex; justify-content:space-between; align-items:center; padding:15px 17px 12px; border-bottom:1px solid var(--line); }
+    .panel-title { font-size:15px; font-weight:800; }
+    .quiet { color:var(--muted); font-size:12px; }
+    .outcomes { padding:8px; }
+    .outcome { position:relative; display:grid; grid-template-columns:1fr 88px 88px; align-items:center; gap:10px; min-height:70px; padding:10px; border-bottom:1px solid var(--line); }
+    .outcome:last-child { border:0; }
+    .outcome.selected { background:#faf9ff; border-radius:7px; border-bottom-color:transparent; }
+    .outcome-main { min-width:0; }
+    .outcome-name { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-weight:760; }
+    .outcome-name span { color:var(--blue); font-size:20px; letter-spacing:-.5px; }
+    .market-stats { display:flex; gap:12px; margin-top:5px; color:var(--muted); font-size:12px; }
+    .market-stats b { color:#495468; font-weight:650; }
+    .price { height:38px; border:1px solid #cad9f8; border-radius:7px; color:var(--blue); background:var(--blue-soft); font-weight:800; }
+    .price.no { color:var(--red); background:var(--red-soft); border-color:#ffd3d6; }
+    .price.selected { color:#fff; background:var(--blue); border-color:var(--blue); box-shadow:inset 0 -2px 0 rgba(0,0,0,.13); }
+    .chart { padding:16px 17px 12px; border-top:1px solid var(--line); }
+    .chart-top { display:flex; align-items:center; justify-content:space-between; }
+    .chart-legend { display:flex; gap:14px; color:var(--muted); font-size:12px; }
+    .chart-legend b { color:var(--ink); }
+    .chart-box { position:relative; height:154px; margin:10px 0 8px; overflow:hidden; background:repeating-linear-gradient(to bottom, transparent 0, transparent 37px, #f0f1f5 38px); }
+    .chart-box svg { width:100%; height:100%; overflow:visible; }
+    .time-range { display:flex; justify-content:flex-end; gap:14px; color:var(--muted); font-size:12px; }
+    .time-range button { border:0; background:none; color:inherit; padding:2px; }
+    .time-range .active { color:var(--purple); font-weight:800; border-bottom:2px solid var(--purple); }
+    .book-tabs { display:flex; gap:17px; }
+    .book-tabs button { padding:0 0 12px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--muted); font-weight:700; }
+    .book-tabs .active { color:var(--ink); border-color:var(--purple); }
+    .book { padding:6px 13px 12px; }
+    .book-labels, .book-row { display:grid; grid-template-columns:1fr 1fr 1fr; align-items:center; }
+    .book-labels { padding:4px 5px 7px; color:var(--muted); font-size:11px; }
+    .book-labels :nth-child(2), .book-labels :nth-child(3), .book-row :nth-child(2), .book-row :nth-child(3) { text-align:right; }
+    .book-row { position:relative; height:29px; padding:0 5px; font-variant-numeric:tabular-nums; font-size:13px; }
+    .book-row::after { content:""; position:absolute; inset:1px 0; z-index:0; background:linear-gradient(to left, transparent var(--fill), var(--red-soft) var(--fill)); }
+    .book-row.bid::after { background:linear-gradient(to left, transparent var(--fill), var(--blue-soft) var(--fill)); }
+    .book-row span { position:relative; z-index:1; }
+    .ask-price { color:var(--red); font-weight:760; }.bid-price { color:var(--blue); font-weight:760; }
+    .mid { display:flex; align-items:center; justify-content:space-between; margin:6px 0; padding:8px 5px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }.mid b { color:var(--ink); font-size:14px; }
+    .ticket { position:sticky; top:14px; }
+    .ticket-head { padding:16px; border-bottom:1px solid var(--line); }
+    .ticket-market { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; }.ticket-market b { color:var(--ink); }
+    .side-toggle { display:grid; grid-template-columns:1fr 1fr; gap:4px; padding:12px 16px 0; }
+    .side-toggle button { height:39px; border:0; border-radius:7px; color:var(--muted); background:#f4f5f8; font-weight:800; }.side-toggle .buy { color:var(--blue); background:var(--blue-soft); }
+    .ticket-body { padding:16px; }.field-label { display:flex; justify-content:space-between; margin-bottom:7px; font-weight:750; }.field-label span { color:var(--muted); font-size:12px; font-weight:500; }
+    .amount { display:flex; align-items:center; margin-bottom:8px; padding:0 13px; border:1px solid #cfd6e2; border-radius:7px; }.amount input { width:100%; padding:13px 0; border:0; outline:0; font-size:22px; font-weight:800; }.amount b { color:var(--muted); }
+    .quick { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }.quick button { height:31px; border:0; border-radius:5px; color:#4e596c; background:#f3f4f7; font-size:12px; font-weight:750; }
+    .return { display:flex; justify-content:space-between; align-items:end; margin:18px 0 14px; padding-top:14px; border-top:1px solid var(--line); }.return span { color:var(--muted); }.return b { display:block; margin-top:2px; font-size:25px; color:var(--green); letter-spacing:-1px; }
+    .submit { width:100%; height:48px; border:0; border-radius:7px; color:#fff; background:#172033; font-weight:800; }
+    .ticket-note { margin:10px 0 0; color:var(--muted); font-size:11px; text-align:center; }
+    .below { display:grid; grid-template-columns:1fr 330px; gap:16px; margin-top:16px; }.rules { padding:17px; }.rules p { margin:8px 0 0; color:var(--muted); font-size:13px; }.related { padding:10px 16px; }.related-item { padding:12px 0; border-bottom:1px solid var(--line); font-weight:700; }.related-item:last-child { border:0; }.related-item span { display:block; margin-top:3px; color:var(--muted); font-size:12px; font-weight:500; }
+    @media (max-width:1100px) { .trading-layout { grid-template-columns:1fr 360px; }.book-panel { grid-column:1; }.ticket { grid-column:2; grid-row:1 / span 2; }.below { grid-template-columns:1fr 360px; }.search { display:none; } }
+    @media (max-width:760px) { .topbar { height:54px; padding:0 16px; gap:16px; }.nav, .wallet > div { display:none; }.page { padding:16px; }.market-head { align-items:flex-start; }.event-meta { display:none; } h1 { font-size:18px; }.trading-layout, .below { grid-template-columns:1fr; }.ticket, .book-panel { grid-column:auto; grid-row:auto; }.ticket { position:static; }.outcome { grid-template-columns:1fr 76px 76px; min-height:78px; }.price { height:46px; font-size:12px; line-height:1.1; }.market-stats { gap:8px; }.chart { display:none; }.below .related { display:none; } }
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="brand">predict<i>.</i></div><nav class="nav"><span class="active">Markets</span><span>World Cup '26</span><span>Points</span><span>Invite</span></nav><div class="search">Search markets...</div><div class="wallet"><div>Portfolio<strong>$2.09</strong></div><div>Available<strong>$2.09</strong></div><button class="deposit">Deposit</button></div></header>
+  <main class="page">
+    <div class="crumb">Esports / League of Legends / LPL</div>
+    <section class="market-head"><div class="title-block"><div class="league">LEAGUE<br>OF LEGENDS</div><div><h1>JD Gaming vs Anyone's Legend <span class="badge">50 pts / hr</span></h1><div class="sub">LPL Group Ascend · Best of 3</div></div></div><div class="event-meta"><div><span>Starts</span><strong>Today, 5:00 PM</strong></div><div><span>Market volume</span><strong>$3,768</strong></div><div><span><i class="live-dot"></i>Market status</span><strong>Open</strong></div></div></section>
+    <section class="trading-layout">
+      <article class="panel outcomes-panel"><div class="panel-head"><div><div class="panel-title">Match markets</div><div class="quiet">Select an outcome to trade</div></div><div class="quiet">5 active</div></div><div class="outcomes">
+        <div class="outcome selected"><div class="outcome-main"><div class="outcome-name">Game 1 Winner <span>52%</span></div><div class="market-stats"><b>Vol. $3,768</b><span>Best spread 1c</span></div></div><button class="price selected" data-team="JD Gaming" data-price="52">JD Gaming 52c</button><button class="price no">AL 49c</button></div>
+        <div class="outcome"><div class="outcome-main"><div class="outcome-name">Game 2 Winner <span>52%</span></div><div class="market-stats"><b>Vol. $3,847</b><span>Best spread 1c</span></div></div><button class="price" data-team="JD Gaming" data-price="52">JD Gaming 52c</button><button class="price no">AL 49c</button></div>
+        <div class="outcome"><div class="outcome-main"><div class="outcome-name">Match Winner <span>51%</span></div><div class="market-stats"><b>Vol. $9,876</b><span>Best spread 1c</span></div></div><button class="price" data-team="JD Gaming" data-price="51">JD Gaming 51c</button><button class="price no">AL 50c</button></div>
+        <div class="outcome"><div class="outcome-main"><div class="outcome-name">Over / Under 2.5 Games <span>49%</span></div><div class="market-stats"><b>Vol. $1,428</b><span>Best spread 2c</span></div></div><button class="price" data-team="Over 2.5" data-price="49">Over 49c</button><button class="price no">Under 52c</button></div>
+      </div>
+      <div class="chart"><div class="chart-top"><div class="chart-legend"><span><b>JD Gaming 52c</b> +3.2%</span><span><b>AL 49c</b> -2.8%</span></div><span class="quiet">Last updated now</span></div><div class="chart-box"><svg viewBox="0 0 600 160" preserveAspectRatio="none"><path d="M0 113 L45 111 L75 114 L103 107 L130 109 L160 84 L184 108 L210 77 L237 84 L268 74 L300 80 L334 58 L370 64 L397 50 L430 65 L470 56 L500 46 L540 53 L600 38" fill="none" stroke="#3378ed" stroke-width="3"/><path d="M0 52 L100 53 L130 56 L160 77 L184 54 L210 88 L237 81 L268 87 L300 80 L334 101 L370 94 L397 108 L430 93 L470 100 L500 111 L540 104 L600 119" fill="none" stroke="#e45863" stroke-width="3"/></svg></div><div class="time-range"><button>1H</button><button>3H</button><button class="active">1D</button><button>7D</button><button>ALL</button></div></div></article>
+      <article class="panel book-panel"><div class="panel-head"><div class="book-tabs"><button class="active">Order book</button><button>Trades</button></div><div class="quiet">JD Gaming · Game 1</div></div><div class="book"><div class="book-labels"><span>Price</span><span>Shares</span><span>Total</span></div><div class="book-row" style="--fill:68%"><span class="ask-price">55c</span><span>135,100</span><span>$233,759</span></div><div class="book-row" style="--fill:48%"><span class="ask-price">54c</span><span>20,547</span><span>$159,454</span></div><div class="book-row" style="--fill:57%"><span class="ask-price">53c</span><span>279,823</span><span>$148,359</span></div><div class="mid"><span>Last trade <b>52c</b></span><span>Spread 1c</span></div><div class="book-row bid" style="--fill:75%"><span class="bid-price">51c</span><span>1,100</span><span>$561</span></div><div class="book-row bid" style="--fill:82%"><span class="bid-price">50c</span><span>136,545</span><span>$68,834</span></div><div class="book-row bid" style="--fill:61%"><span class="bid-price">49c</span><span>80,816</span><span>$108,433</span></div><div class="book-row bid" style="--fill:34%"><span class="bid-price">48c</span><span>3,133</span><span>$109,937</span></div></div></article>
+      <aside class="panel ticket"><div class="ticket-head"><div class="ticket-market"><span>Trading</span><b id="selected-market">Game 1 Winner · JD Gaming</b></div></div><div class="side-toggle"><button class="buy">Buy</button><button>Sell</button></div><div class="ticket-body"><div class="field-label">Amount <span>Balance: $2.09</span></div><div class="amount"><input id="amount" value="1" inputmode="decimal"><b>USDC</b></div><div class="quick"><button data-amount="5">$5</button><button data-amount="10">$10</button><button data-amount="50">$50</button><button data-amount="100">Max</button></div><div class="return"><span>To win <small id="buy-price">at 52c</small></span><div><b id="return-value">$1.92</b><span>Estimated payout</span></div></div><button class="submit" id="submit">Buy JD Gaming</button><p class="ticket-note">You will receive approximately 1.92 shares.</p></div></aside>
+    </section>
+    <section class="below"><article class="panel rules"><div class="panel-title">Market rules</div><p>Resolves to the team that wins the specified game in JD Gaming vs Anyone's Legend. Official match results determine resolution.</p></article><aside class="panel related"><div class="panel-title">Related markets</div><div class="related-item">Match Winner <span>JD Gaming 51c · AL 50c</span></div><div class="related-item">Anyone's Legend vs LGD <span>AL 82c · LGD 18c</span></div></aside></section>
+  </main>
+  <script>
+    const amount = document.querySelector('#amount');
+    const team = document.querySelector('#selected-market');
+    const buyPrice = document.querySelector('#buy-price');
+    const returnValue = document.querySelector('#return-value');
+    const submit = document.querySelector('#submit');
+    let price = 52, selected = 'JD Gaming';
+    function updateTicket() { const value = Number(amount.value) || 0; const payout = price ? value / (price / 100) : 0; buyPrice.textContent = `at ${price}c`; returnValue.textContent = `$${payout.toFixed(2)}`; submit.textContent = `Buy ${selected}`; }
+    document.querySelectorAll('.price').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.price.selected').forEach(item => item.classList.remove('selected')); button.classList.add('selected'); document.querySelectorAll('.outcome').forEach(item => item.classList.remove('selected')); button.closest('.outcome').classList.add('selected'); selected = button.dataset.team || button.textContent.replace(/\s\d+c/, ''); price = Number(button.dataset.price || button.textContent.match(/\d+/)[0]); team.textContent = `${button.closest('.outcome').querySelector('.outcome-name').childNodes[0].textContent.trim()} · ${selected}`; updateTicket(); }));
+    document.querySelectorAll('.quick button').forEach(button => button.addEventListener('click', () => { amount.value = button.dataset.amount; updateTicket(); }));
+    amount.addEventListener('input', updateTicket);
+    updateTicket();
+  </script>
+</body>
+</html>

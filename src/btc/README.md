@@ -78,3 +78,45 @@ Z_TRADE_NOTIONAL_USD=10
 Z_MAX_SNAPSHOT_AGE_MS=10000
 Z_TAIL_INTERVAL_MS=1000
 ```
+
+## Z 策略固定金额执行器
+
+执行器消费新产生的 `PAPER_BUY`，在下单前重新获取市场和订单簿，并重新校验当前 ask、折后 taker 成本、剩余时间和信号的胜率下界。它不会处理最后 5 秒固定价差策略。
+
+默认只监听，不会下单：
+
+```bash
+npm run execute:btc:z
+```
+
+建议先在 `.env` 使用纸面模式：
+
+```bash
+# 是否允许真实下单。先保持 false；只有准备使用真实资金时才改为 true。
+Z_LIVE_TRADING=false
+
+# 每笔固定投入 USDT。首次真实验证建议 1，确认订单状态和费用后再提高。
+Z_EXECUTION_NOTIONAL_USD=1
+
+# 信号生成超过多少毫秒则放弃，防止延迟订单。建议 3000。
+Z_EXECUTION_MAX_SIGNAL_AGE_MS=3000
+
+# 距离市场结算少于多少秒就不下单。建议 20，避免临近结算的网络和盘口风险。
+Z_EXECUTION_MIN_REMAINING_SECONDS=20
+
+# 当前卖一超过此价格则不买。建议 0.95，避免高价合约剩余收益不足。
+Z_EXECUTION_MAX_ASK=0.95
+
+# 严格限价买单保持 OPEN 多久后撤单。建议 2000 毫秒。
+Z_EXECUTION_ORDER_TIMEOUT_MS=2000
+
+# 检查新纸面信号的频率。建议 500 毫秒。
+Z_EXECUTION_TAIL_INTERVAL_MS=500
+
+# 执行器运行心跳日志间隔。建议 30000 毫秒。
+Z_EXECUTION_HEARTBEAT_MS=30000
+```
+
+确认纸面信号、账户签名、下单、撤单和费用记录都正确后，才将 `Z_LIVE_TRADING=true`。开始实盘时仍建议先保留 `Z_EXECUTION_NOTIONAL_USD=1`，不要直接使用较大金额。
+
+真实执行还需要现有 Predict 账户配置：`PREDICT_API_KEY`、`PRIVY_PRIVATE_KEY`、`PREDICT_ACCOUNT`。订单以当前卖一提交严格限价买单；若在超时内仍保持 OPEN，执行器会撤单。执行日志写入 `data/btc/z_score_execution_log.jsonl`，状态写入 `data/btc/z_score_executor_state.json`。启用实盘前，先保持 `Z_LIVE_TRADING=false` 验证信号和执行日志。
