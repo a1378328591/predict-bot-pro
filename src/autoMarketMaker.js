@@ -52,6 +52,7 @@ const EXPIRE_BEFORE_START_MS = 5 * 60 * 1000; // 开赛前15分钟订单失效
 const CLOSE_BEFORE_START_MS = 2 * 60 * 1000; // 开赛前2分钟持仓按原逻辑退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
+const ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS = 60_000; // 成本价异常时，单个持仓最多每分钟查询一次已成交订单
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
 const VOLATILE_MARKET_KEYWORDS = [
   "bitcoin",
@@ -132,6 +133,7 @@ let latestActiveRewardMarketsFetchedAt = 0;
 const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let latestOpenOrdersFetchedAt = 0;
+const zeroCostOrderDiagnosticsFetchedAt = new Map();
 let monitorRunning = false;
 let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
@@ -892,6 +894,96 @@ async function getOpenOrders(throwOnError = false) {
   }
 }
 
+function getOrderLatestAt(order) {
+  return getFirstValidDate([
+    order?.filledAt,
+    order?.matchedAt,
+    order?.completedAt,
+    order?.updatedAt,
+    order?.createdAt,
+    order?.order?.filledAt,
+    order?.order?.matchedAt,
+    order?.order?.completedAt,
+    order?.order?.updatedAt,
+    order?.order?.createdAt,
+  ]);
+}
+
+async function logZeroCostPositionOrderDiagnostics(marketId, tokenId, outcomeId) {
+  const key = String(marketId) + "-" + String(tokenId);
+  const lastFetchedAt = zeroCostOrderDiagnosticsFetchedAt.get(key) ?? 0;
+  if (Date.now() - lastFetchedAt < ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS) return;
+  zeroCostOrderDiagnosticsFetchedAt.set(key, Date.now());
+
+  try {
+    const jwt = await getJwtTokenWithSDK();
+    const orders = [];
+    const seenCursors = new Set();
+    let after = null;
+
+    while (true) {
+      const query = new URLSearchParams({ status: "FILLED", first: "200" });
+      if (after) query.set("after", after);
+
+      const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+        headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+      });
+      if (!res.ok) throw new Error("filled orders status " + res.status);
+      const json = await res.json();
+      const pageOrders = json.data || [];
+      orders.push(...pageOrders);
+
+      if (!json.cursor || pageOrders.length === 0 || seenCursors.has(json.cursor)) break;
+      seenCursors.add(json.cursor);
+      after = json.cursor;
+    }
+
+    const matchingRawOrders = orders
+      .filter(order => {
+        if (getOrderSide(order) !== "BUY" || String(getOrderMarketId(order)) !== String(marketId)) return false;
+        const orderTokenId = getOrderTokenId(order);
+        const orderOutcomeId = getOrderOutcomeId(order);
+        return (orderTokenId && String(orderTokenId) === String(tokenId))
+          || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
+      });
+    const matchingOrders = matchingRawOrders
+      .map(order => {
+        const latestAt = getOrderLatestAt(order);
+        return {
+          id: getOrderId(order),
+          status: order?.status ?? order?.order?.status,
+          marketId: getOrderMarketId(order),
+          tokenId: getOrderTokenId(order),
+          outcomeId: getOrderOutcomeId(order),
+          price: getOrderPrice(order),
+          latestAt: latestAt?.toISOString() ?? null,
+          latestAtMs: latestAt?.getTime() ?? 0,
+          priceFields: {
+            price: order?.price,
+            pricePerShare: order?.pricePerShare,
+            orderPricePerShare: order?.order?.pricePerShare,
+            makerAmount: order?.order?.makerAmount ?? order?.makerAmount,
+            takerAmount: order?.order?.takerAmount ?? order?.takerAmount,
+          },
+        };
+      })
+      .sort((a, b) => b.latestAtMs - a.latestAtMs);
+    const recentRawMatchingOrders = [...matchingRawOrders]
+      .sort((a, b) => (getOrderLatestAt(b)?.getTime() ?? 0) - (getOrderLatestAt(a)?.getTime() ?? 0))
+      .slice(0, 5);
+
+    console.log("🧪 成本价为0订单诊断 marketId=" + marketId
+      + " tokenId=" + tokenId
+      + " outcomeId=" + (outcomeId ?? "")
+      + " filledBuyOrders=" + matchingOrders.length
+      + " latestCostCandidate=" + safeJson(matchingOrders[0] ?? null, 3000)
+      + " recent=" + safeJson(matchingOrders.slice(0, 5), 8000)
+      + " rawMatchingOrders=" + safeJson(recentRawMatchingOrders, 12000));
+  } catch (e) {
+    console.log("⚠️ 成本价为0订单诊断失败 marketId=" + marketId + " tokenId=" + tokenId + " error=" + e.message);
+  }
+}
+
 // 获取持仓
 async function getPositions() {
   try {
@@ -1454,6 +1546,12 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
+    const averageBuyPriceUsd = pos?.averageBuyPriceUsd;
+    const hasZeroAverageBuyPriceUsd = averageBuyPriceUsd !== undefined && averageBuyPriceUsd !== null && averageBuyPriceUsd !== "" && Number(averageBuyPriceUsd) === 0;
+    if (hasZeroAverageBuyPriceUsd) {
+      void logZeroCostPositionOrderDiagnostics(marketId, tokenId, outcomeId);
+    }
+
     const openBuyOrders = getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId);
     if (openBuyOrders.length > 0) {
       const buyOrderIds = openBuyOrders.map(getOrderId).filter(Boolean);
@@ -1531,8 +1629,6 @@ async function closeSinglePosition(pos, openOrders) {
     }
     const buyPrice = getPositionBuyPrice(pos);
     console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
-    const averageBuyPriceUsd = pos?.averageBuyPriceUsd;
-    const hasZeroAverageBuyPriceUsd = averageBuyPriceUsd !== undefined && averageBuyPriceUsd !== null && averageBuyPriceUsd !== "" && Number(averageBuyPriceUsd) === 0;
     if (!buyPrice && !hasZeroAverageBuyPriceUsd) {
       console.log("⚠️ 无法识别持仓买入价，放弃平仓 marketId=" + marketId);
       return;
