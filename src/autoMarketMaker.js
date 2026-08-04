@@ -134,6 +134,7 @@ const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let latestOpenOrdersFetchedAt = 0;
 const zeroCostOrderDiagnosticsFetchedAt = new Map();
+const zeroCostRecoveredBuyPrices = new Map();
 let monitorRunning = false;
 let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
@@ -909,7 +910,13 @@ function getOrderLatestAt(order) {
   ]);
 }
 
-async function logZeroCostPositionOrderDiagnostics(marketId, tokenId, outcomeId) {
+function getZeroCostRecoveredBuyPrice(marketId, tokenId) {
+  const cached = zeroCostRecoveredBuyPrices.get(String(marketId) + "-" + String(tokenId));
+  const price = Number(cached?.price);
+  return Number.isFinite(price) && price > 0 && price <= 1 ? { ...cached, price } : null;
+}
+
+async function refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId) {
   const key = String(marketId) + "-" + String(tokenId);
   const lastFetchedAt = zeroCostOrderDiagnosticsFetchedAt.get(key) ?? 0;
   if (Date.now() - lastFetchedAt < ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS) return;
@@ -972,11 +979,22 @@ async function logZeroCostPositionOrderDiagnostics(marketId, tokenId, outcomeId)
       .sort((a, b) => (getOrderLatestAt(b)?.getTime() ?? 0) - (getOrderLatestAt(a)?.getTime() ?? 0))
       .slice(0, 5);
 
+    const latest = matchingOrders[0] ?? null;
+    if (latest?.price && latest.price > 0 && latest.price <= 1) {
+      zeroCostRecoveredBuyPrices.set(key, {
+        price: latest.price,
+        orderId: latest.id,
+        orderUpdatedAt: latest.latestAt,
+        recoveredAt: new Date().toISOString(),
+      });
+    }
+
     console.log("🧪 成本价为0订单诊断 marketId=" + marketId
       + " tokenId=" + tokenId
       + " outcomeId=" + (outcomeId ?? "")
       + " filledBuyOrders=" + matchingOrders.length
-      + " latestCostCandidate=" + safeJson(matchingOrders[0] ?? null, 3000)
+      + " latestCostCandidate=" + safeJson(latest, 3000)
+      + " cachedCost=" + safeJson(getZeroCostRecoveredBuyPrice(marketId, tokenId), 1000)
       + " recent=" + safeJson(matchingOrders.slice(0, 5), 8000)
       + " rawMatchingOrders=" + safeJson(recentRawMatchingOrders, 12000));
   } catch (e) {
@@ -1549,7 +1567,9 @@ async function closeSinglePosition(pos, openOrders) {
     const averageBuyPriceUsd = pos?.averageBuyPriceUsd;
     const hasZeroAverageBuyPriceUsd = averageBuyPriceUsd !== undefined && averageBuyPriceUsd !== null && averageBuyPriceUsd !== "" && Number(averageBuyPriceUsd) === 0;
     if (hasZeroAverageBuyPriceUsd) {
-      void logZeroCostPositionOrderDiagnostics(marketId, tokenId, outcomeId);
+      void refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId);
+    } else {
+      zeroCostRecoveredBuyPrices.delete(closeKey);
     }
 
     const openBuyOrders = getOpenBuyOrdersForPosition(openOrders, marketId, tokenId, outcomeId);
@@ -1627,15 +1647,18 @@ async function closeSinglePosition(pos, openOrders) {
       console.log("⏭️ 待补卖差额小于1份，保留尾差避免最小下单/精度错误 marketId=" + marketId + " tokenId=" + tokenId + " remainingWei=" + closeQuantityWei.toString());
       return;
     }
-    const buyPrice = getPositionBuyPrice(pos);
-    console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
+    const positionBuyPrice = getPositionBuyPrice(pos);
+    const recoveredBuyPrice = hasZeroAverageBuyPriceUsd ? getZeroCostRecoveredBuyPrice(marketId, tokenId) : null;
+    const buyPrice = positionBuyPrice ?? recoveredBuyPrice?.price ?? null;
+    const buyPriceSource = positionBuyPrice ? "position" : recoveredBuyPrice ? "filled-order-cache" : "missing";
+    console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " buyPrice=" + (buyPrice ?? "null") + " source=" + buyPriceSource + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
     if (!buyPrice && !hasZeroAverageBuyPriceUsd) {
       console.log("⚠️ 无法识别持仓买入价，放弃平仓 marketId=" + marketId);
       return;
     }
 
     const book = await getPredictBook(marketId);
-    if (urgentCloseReason && hasZeroAverageBuyPriceUsd) {
+    if (urgentCloseReason && hasZeroAverageBuyPriceUsd && !buyPrice) {
       const predictBid = getBestPredictBidFromBook(book, market, outcome);
       if (!predictBid || predictBid <= 0) {
         console.log("⚠️ 紧急平仓成本价为0但 Predict 买一为空，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
@@ -1670,7 +1693,7 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    if (hasZeroAverageBuyPriceUsd) {
+    if (hasZeroAverageBuyPriceUsd && !buyPrice) {
       console.log("⚠️ 持仓成本价为0，非紧急状态不挂可能吃单的卖单 marketId=" + marketId + " tokenId=" + tokenId);
       return;
     }
