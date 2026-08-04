@@ -76,6 +76,9 @@ const VOLATILE_MARKET_KEYWORDS = [
   "-1.5",
   "-2.5",
   "-3.5",
+  "challengers",
+  "academy",
+  "lck-cl",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
