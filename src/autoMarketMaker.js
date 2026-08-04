@@ -28,7 +28,7 @@ console.error = (...args) => {
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
 const MAX_ORDER_USD = 400; // 单笔买单最多使用金额
-const CHECK_INTERVAL_MS = 3 * 60_000; // 3分钟执行一轮挂单
+const CHECK_INTERVAL_MS = 4 * 60_000; // 3分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 20 * 60_000; // 每20分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
@@ -48,8 +48,8 @@ const MIN_BUY_SHARES = 100; // 本次买单份额低于100不挂，等于100可�
 const SELL_ORDER_REPRICE_THRESHOLD = 0.01; // 卖单高于成本、且买一低于成本至少1个点时撤单重挂
 const MIN_REWARD_SELL_SHARES = 100; // 卖单达到100份才有积分奖励
 const MIN_REWARD_SELL_QUANTITY_WEI = BigInt(MIN_REWARD_SELL_SHARES) * 10n ** 18n;
-const EXPIRE_BEFORE_START_MS = 15 * 60 * 1000; // 开赛前15分钟订单失效
-const CLOSE_BEFORE_START_MS = 1 * 60 * 1000; // 开赛前20分钟持仓按原逻辑退出，允许亏损
+const EXPIRE_BEFORE_START_MS = 5 * 60 * 1000; // 开赛前15分钟订单失效
+const CLOSE_BEFORE_START_MS = 2 * 60 * 1000; // 开赛前2分钟持仓按原逻辑退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
