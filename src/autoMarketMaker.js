@@ -9,11 +9,38 @@ import { logPredict429 } from "./rateLimitLogger.js";
 const { PREDICT_API_KEY, PRIVY_PRIVATE_KEY, PREDICT_ACCOUNT, RPC_URL } = process.env;
 
 const LOG_FILE = "autoMarketMaker.log";
+const PLACEMENT_LOG_FILE = "autoMarketMaker.placement.log";
 const originalLog = console.log.bind(console);
 const originalError = console.error.bind(console);
 
 function writeLog(args) {
   appendFileSync(LOG_FILE, format(...args) + "\n", "utf8");
+}
+
+function formatDuration(durationMs) {
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const milliseconds = durationMs % 1000;
+  return [
+    hours ? hours + "小时" : "",
+    minutes ? minutes + "分" : "",
+    seconds ? seconds + "秒" : "",
+    milliseconds ? milliseconds + "毫秒" : "",
+  ].join("") || "0毫秒";
+}
+
+function writePlacementCycleLog(record) {
+  try {
+    const line = JSON.stringify(record);
+    try {
+      appendFileSync(PLACEMENT_LOG_FILE, line + "\n", "utf8");
+    } catch {}
+    try {
+      console.log("📊 本轮挂单统计:", line);
+    } catch {}
+  } catch {}
 }
 
 console.log = (...args) => {
@@ -29,13 +56,13 @@ console.error = (...args) => {
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
 const MAX_ORDER_USD = 400; // 单笔买单最多使用金额
-const CHECK_INTERVAL_MS = 5 * 60_000; // 3分钟执行一轮挂单
+const CHECK_INTERVAL_MS = 8 * 60_000; // 3分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 20 * 60_000; // 每20分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 4_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
-const MARKET_DELAY_MS = 300; // 每个市场之间等待100ms
-const OUTCOME_DELAY_MS = 150; // 同一市场每个outcome之间等待50ms
+const MARKET_DELAY_MS = 400; // 每个市场之间等待100ms
+const OUTCOME_DELAY_MS = 250; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
 const MIN_BUY_PRICE = 0.30; // 价格低于30不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
@@ -2306,8 +2333,17 @@ async function main() {
   while (true) {
     const triggeredByTimedCancel = placementRefreshRequested;
     placementRefreshRequested = false;
-    if (triggeredByTimedCancel) console.log("🔄 执行定时撤单后的补挂流程");
     const mainLoopStartedAt = Date.now();
+    const placementCycleStartedAt = mainLoopStartedAt;
+    const placementTrigger = triggeredByTimedCancel ? "定时撤单后补挂" : "定时挂单";
+    let placementStatus = "success";
+    let placementError = "";
+    let marketTotal = 0;
+    let processedMarkets = 0;
+    let totalNew = 0;
+    let totalSkip = 0;
+
+    if (triggeredByTimedCancel) console.log("🔄 执行定时撤单后的补挂流程");
     try {
       // 1. 获取余额
       const balance = await getBalance();
@@ -2315,9 +2351,22 @@ async function main() {
       console.log("\n💰 余额: " + balUsdt.toFixed(2) + " USDT");
 
       if (balance < 1n * 10n ** 18n) {
+        placementStatus = "insufficient-balance";
         console.log("⚠️ 余额不足，等待...");
         logElapsed("主循环结束", mainLoopStartedAt, "reason=余额不足 balance=" + balUsdt.toFixed(2));
-        await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
+        writePlacementCycleLog({
+          timestamp: new Date().toISOString(),
+          trigger: placementTrigger,
+          status: placementStatus,
+          marketTotal,
+          processedMarkets,
+          newOrderCount: totalNew,
+          skipCount: totalSkip,
+          durationMs: Date.now() - placementCycleStartedAt,
+          duration: formatDuration(Date.now() - placementCycleStartedAt),
+        });
+        const wokeForTimedCancel = await waitForNextPlacementCycle();
+        if (wokeForTimedCancel) console.log("🔄 收到定时撤单完成信号，立即开始补挂流程");
         continue;
       }
 
@@ -2329,6 +2378,7 @@ async function main() {
 
       // 3. 获取市场
       const markets = await getMarkets();
+      marketTotal = markets.length;
       console.log("📈 市场: " + markets.length + "个");
 
       // 4. 获取现有挂单
@@ -2336,10 +2386,6 @@ async function main() {
       console.log("📋 现有: " + existingOrders.length + "单");
 
       // 5. 批量挂单（每个市场独立）；撤单风控由高频监控循环独立执行
-      let totalNew = 0;
-      let totalSkip = 0;
-      let processedMarkets = 0;
-
       for (const market of markets) {
         try {
           const result = await processMarket(market, amountWei, existingOrders);
@@ -2354,10 +2400,35 @@ async function main() {
 
       console.log("✅ 处理: " + processedMarkets + "市场, 新挂: " + totalNew + "单, 跳过: " + totalSkip + "单");
       logElapsed("主循环结束", mainLoopStartedAt, "markets=" + processedMarkets + " new=" + totalNew + " skip=" + totalSkip);
+      writePlacementCycleLog({
+        timestamp: new Date().toISOString(),
+        trigger: placementTrigger,
+        status: placementStatus,
+        marketTotal,
+        processedMarkets,
+        newOrderCount: totalNew,
+        skipCount: totalSkip,
+        durationMs: Date.now() - placementCycleStartedAt,
+        duration: formatDuration(Date.now() - placementCycleStartedAt),
+      });
 
     } catch (e) {
+      placementStatus = "error";
+      placementError = e?.message || String(e);
       console.error("❌ 主循环错误:", e.message);
       logElapsed("主循环结束", mainLoopStartedAt, "error=" + e.message);
+      writePlacementCycleLog({
+        timestamp: new Date().toISOString(),
+        trigger: placementTrigger,
+        status: placementStatus,
+        error: placementError,
+        marketTotal,
+        processedMarkets,
+        newOrderCount: totalNew,
+        skipCount: totalSkip,
+        durationMs: Date.now() - placementCycleStartedAt,
+        duration: formatDuration(Date.now() - placementCycleStartedAt),
+      });
     }
 
     if (!placementRefreshRequested) console.log("⏳ 5分钟后继续...\n");
