@@ -141,6 +141,8 @@ let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
 let positionsResponseLogged = false;
+let placementRefreshRequested = false;
+let wakePlacementLoop = null;
 const closingPositions = new Set();
 const pendingCloseOrders = new Map();
 const lastRewardSellPositionQuantities = new Map();
@@ -149,6 +151,36 @@ let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
 let startTimeRefreshLoopCount = 0;
+
+function requestPlacementAfterTimedCancel() {
+  placementRefreshRequested = true;
+  try {
+    wakePlacementLoop?.();
+  } catch {}
+}
+
+function waitForNextPlacementCycle() {
+  if (placementRefreshRequested) return Promise.resolve(true);
+
+  return new Promise(resolve => {
+    let timer = null;
+    let completed = false;
+    const wake = () => finish(true);
+    const finish = triggeredByTimedCancel => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timer);
+      if (wakePlacementLoop === wake) wakePlacementLoop = null;
+      resolve(triggeredByTimedCancel);
+    };
+
+    wakePlacementLoop = wake;
+    timer = setTimeout(() => finish(false), CHECK_INTERVAL_MS);
+
+    // Preserve a request that arrived while this wait was being installed.
+    if (placementRefreshRequested) wake();
+  });
+}
 
 function loadBlockedMarkets() {
   try {
@@ -2030,6 +2062,7 @@ async function hourlyCancelLoop() {
     const loopStartedAt = Date.now();
     let openOrdersCount = 0;
     let cancelIdsCount = 0;
+    let cancelledCount = 0;
     try {
       const openOrders = await getOpenOrders(true);
       const orderIds = openOrders
@@ -2040,12 +2073,17 @@ async function hourlyCancelLoop() {
       cancelIdsCount = orderIds.length;
       hourlyCancelLoopCount++;
       console.log("🕐 定时撤买单运行中 openOrders=" + openOrders.length + " buyIds=" + orderIds.length + " round=" + hourlyCancelLoopCount);
-      await cancelOrders(orderIds, "定时刷新买单，避免长期排队");
+      cancelledCount = await cancelOrders(orderIds, "定时刷新买单，避免长期排队");
     } catch (e) {
       console.log("⚠️ 小时撤单异常:", e.message);
     } finally {
       hourlyCancelRunning = false;
       logElapsed("小时撤单结束", loopStartedAt, "openOrders=" + openOrdersCount + " ids=" + cancelIdsCount);
+    }
+
+    if (cancelledCount > 0) {
+      requestPlacementAfterTimedCancel();
+      console.log("🔄 定时撤单全部完成，已请求立即补挂 cancelled=" + cancelledCount);
     }
   }
 }
@@ -2266,6 +2304,9 @@ async function main() {
   startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
   while (true) {
+    const triggeredByTimedCancel = placementRefreshRequested;
+    placementRefreshRequested = false;
+    if (triggeredByTimedCancel) console.log("🔄 执行定时撤单后的补挂流程");
     const mainLoopStartedAt = Date.now();
     try {
       // 1. 获取余额
@@ -2319,8 +2360,9 @@ async function main() {
       logElapsed("主循环结束", mainLoopStartedAt, "error=" + e.message);
     }
 
-    console.log("⏳ 5分钟后继续...\n");
-    await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
+    if (!placementRefreshRequested) console.log("⏳ 5分钟后继续...\n");
+    const wokeForTimedCancel = await waitForNextPlacementCycle();
+    if (wokeForTimedCancel) console.log("🔄 收到定时撤单完成信号，立即开始补挂流程");
   }
 }
 
