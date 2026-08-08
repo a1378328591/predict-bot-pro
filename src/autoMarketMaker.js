@@ -4,6 +4,7 @@ import { format } from "node:util";
 import { Wallet, Contract, JsonRpcProvider } from "ethers";
 import { OrderBuilder, ChainId, Side } from "@predictdotfun/sdk";
 import { getJwtTokenWithSDK } from "./getJwtTokenWithSDK.js";
+import { logPredict429 } from "./rateLimitLogger.js";
 
 const { PREDICT_API_KEY, PRIVY_PRIVATE_KEY, PREDICT_ACCOUNT, RPC_URL } = process.env;
 
@@ -28,13 +29,13 @@ console.error = (...args) => {
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
 const MAX_ORDER_USD = 400; // 单笔买单最多使用金额
-const CHECK_INTERVAL_MS = 4 * 60_000; // 3分钟执行一轮挂单
+const CHECK_INTERVAL_MS = 5 * 60_000; // 3分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 20 * 60_000; // 每20分钟撤掉现有挂单，避免长期排队被顶在后面
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
-const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
+const POSITION_MONITOR_INTERVAL_MS = 4_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
-const MARKET_DELAY_MS = 100; // 每个市场之间等待100ms
-const OUTCOME_DELAY_MS = 50; // 同一市场每个outcome之间等待50ms
+const MARKET_DELAY_MS = 300; // 每个市场之间等待100ms
+const OUTCOME_DELAY_MS = 150; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
 const MIN_BUY_PRICE = 0.30; // 价格低于30不挂买单
 const POLY_MIN_BID_USD = 200; // Polymarket 买一金额低于该值不挂/撤单
@@ -49,7 +50,7 @@ const SELL_ORDER_REPRICE_THRESHOLD = 0.01; // 卖单高于成本、且买一低�
 const MIN_REWARD_SELL_SHARES = 100; // 卖单达到100份才有积分奖励
 const MIN_REWARD_SELL_QUANTITY_WEI = BigInt(MIN_REWARD_SELL_SHARES) * 10n ** 18n;
 const EXPIRE_BEFORE_START_MS = 5 * 60 * 1000; // 开赛前15分钟订单失效
-const CLOSE_BEFORE_START_MS = 2 * 60 * 1000; // 开赛前2分钟持仓按原逻辑退出，允许亏损
+const CLOSE_BEFORE_START_MS = 1 * 60 * 1000; // 开赛前2分钟持仓按原逻辑退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS = 60_000; // 成本价异常时，单个持仓最多每分钟查询一次已成交订单
@@ -212,9 +213,11 @@ async function getMarketCategory(categorySlug) {
   if (categoryCache.has(key)) return categoryCache.get(key);
 
   try {
-    const res = await fetch("https://api.predict.fun/v1/categories/" + encodeURIComponent(key), {
+    const url = "https://api.predict.fun/v1/categories/" + encodeURIComponent(key);
+    const res = await fetch(url, {
       headers: { "x-api-key": PREDICT_API_KEY },
     });
+    logPredict429(res, { operation: "获取市场分类", url });
     if (!res.ok) throw new Error("category status " + res.status);
     const json = await res.json();
     const category = json.data ?? null;
@@ -611,7 +614,10 @@ async function getMarkets() {
 
       const url = "https://api.predict.fun/v1/markets?" + query.toString();
       const res = await fetch(url, { headers: { "x-api-key": PREDICT_API_KEY } });
-      if (!res.ok) throw new Error("markets status " + res.status);
+      logPredict429(res, { operation: "获取活跃市场", url });
+      if (!res.ok) {
+        throw new Error("markets status " + res.status);
+      }
       const json = await res.json();
       const pageMarkets = json.data || [];
 
@@ -872,9 +878,11 @@ async function getOpenOrders(throwOnError = false) {
       const query = new URLSearchParams({ status: "OPEN", first: "200" });
       if (after) query.set("after", after);
 
-      const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+      const url = "https://api.predict.fun/v1/orders?" + query.toString();
+      const res = await fetch(url, {
         headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
       });
+      logPredict429(res, { operation: "获取当前挂单", url });
       if (!res.ok) throw new Error("orders status " + res.status);
       const json = await res.json();
       const pageOrders = json.data || [];
@@ -932,9 +940,11 @@ async function refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId) {
       const query = new URLSearchParams({ status: "FILLED", first: "200" });
       if (after) query.set("after", after);
 
-      const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+      const url = "https://api.predict.fun/v1/orders?" + query.toString();
+      const res = await fetch(url, {
         headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
       });
+      logPredict429(res, { operation: "获取已成交订单", url });
       if (!res.ok) throw new Error("filled orders status " + res.status);
       const json = await res.json();
       const pageOrders = json.data || [];
@@ -1006,9 +1016,11 @@ async function refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId) {
 async function getPositions() {
   try {
     const jwt = await getJwtTokenWithSDK();
-    const res = await fetch("https://api.predict.fun/v1/positions?first=100", {
+    const url = "https://api.predict.fun/v1/positions?first=100";
+    const res = await fetch(url, {
       headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
     });
+    logPredict429(res, { operation: "获取持仓", url });
     const json = await res.json();
     if (!positionsResponseLogged) {
       positionsResponseLogged = true;
@@ -1026,7 +1038,8 @@ async function cancelOrder(orderId, reason) {
   try {
     const jwt = await getJwtTokenWithSDK();
     const startedAt = Date.now();
-    const res = await fetch("https://api.predict.fun/v1/orders/remove", {
+    const url = "https://api.predict.fun/v1/orders/remove";
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1035,6 +1048,7 @@ async function cancelOrder(orderId, reason) {
       },
       body: JSON.stringify({ data: { ids: [String(orderId)] } }),
     });
+    logPredict429(res, { operation: "撤单", method: "POST", url });
     logElapsed("撤单请求", startedAt, "orderId=" + orderId + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 已撤单:", orderId, reason || "");
@@ -1055,7 +1069,8 @@ async function cancelOrders(orderIds, reason) {
   try {
     const jwt = await getJwtTokenWithSDK();
     const startedAt = Date.now();
-    const res = await fetch("https://api.predict.fun/v1/orders/remove", {
+    const url = "https://api.predict.fun/v1/orders/remove";
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1064,6 +1079,7 @@ async function cancelOrders(orderIds, reason) {
       },
       body: JSON.stringify({ data: { ids } }),
     });
+    logPredict429(res, { operation: "批量撤单", method: "POST", url });
     logElapsed("批量撤单请求", startedAt, "count=" + ids.length + " status=" + res.status);
     if (!res.ok) throw new Error("remove status " + res.status + " " + (await res.text()).slice(0, 100));
     console.log("🧯 批量已撤单:", ids.length, reason || "");
@@ -1114,7 +1130,8 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
   const startedAt = Date.now();
-  const res = await fetch("https://api.predict.fun/v1/orders", {
+  const url = "https://api.predict.fun/v1/orders";
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1123,6 +1140,7 @@ async function placeBuyLimit(market, outcome, priceWei, amountWei, expiresAt) {
     },
     body,
   });
+  logPredict429(res, { operation: "挂限价买单", method: "POST", url });
   logElapsed("挂买单请求", startedAt, "marketId=" + market.id + " tokenId=" + outcome.onChainId + " status=" + res.status);
 
   if (!res.ok) {
@@ -1187,7 +1205,8 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei) {
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
   const startedAt = Date.now();
-  const res = await fetch("https://api.predict.fun/v1/orders", {
+  const url = "https://api.predict.fun/v1/orders";
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1196,6 +1215,7 @@ async function placeSellLimit(market, tokenId, priceWei, quantityWei) {
     },
     body,
   });
+  logPredict429(res, { operation: "挂限价卖单", method: "POST", url });
   logElapsed("挂卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
 
   if (!res.ok) {
@@ -1241,7 +1261,8 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
   const body = JSON.stringify(payload, (_, v) => typeof v === "bigint" ? v.toString() : v);
 
   const startedAt = Date.now();
-  const res = await fetch("https://api.predict.fun/v1/orders", {
+  const url = "https://api.predict.fun/v1/orders";
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1250,6 +1271,7 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
     },
     body,
   });
+  logPredict429(res, { operation: "市价卖单", method: "POST", url });
   logElapsed("市价卖单请求", startedAt, "marketId=" + (market?.id ?? "") + " tokenId=" + tokenId + " status=" + res.status);
 
   if (!res.ok) {
@@ -1262,6 +1284,7 @@ async function placeSellMarketSmall(market, tokenId, quantityWei, book) {
 async function getPredictBook(marketId) {
   const url = "https://api.predict.fun/v1/markets/" + marketId + "/orderbook";
   const res = await fetch(url, { headers: { "x-api-key": PREDICT_API_KEY } });
+  logPredict429(res, { operation: "获取订单簿", url });
   if (!res.ok) throw new Error("orderbook status " + res.status);
   const json = await res.json();
   return json.data;

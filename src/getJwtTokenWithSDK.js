@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Wallet } from "ethers";
 import { OrderBuilder, ChainId } from "@predictdotfun/sdk";
+import { logPredict429 } from "./rateLimitLogger.js";
 
 /**
  * =========================
@@ -47,12 +48,14 @@ async function getJwtTokenWithSDK() {
   );
 
   // 3️⃣ 获取动态 message
-  const msgRes = await fetch("https://api.predict.fun/v1/auth/message", {
+  const messageUrl = "https://api.predict.fun/v1/auth/message";
+  const msgRes = await fetch(messageUrl, {
     method: "GET",
     headers: {
       "x-api-key": PREDICT_API_KEY,
     },
   });
+  logPredict429(msgRes, { operation: "获取认证消息", url: messageUrl });
 
   if (!msgRes.ok) {
     throw new Error(`获取 auth message 失败: ${msgRes.status}`);
@@ -69,7 +72,8 @@ async function getJwtTokenWithSDK() {
   const signature = await builder.signPredictAccountMessage(message);
 
   // 5️⃣ 获取 JWT
-  const jwtRes = await fetch("https://api.predict.fun/v1/auth", {
+  const authUrl = "https://api.predict.fun/v1/auth";
+  const jwtRes = await fetch(authUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -81,6 +85,7 @@ async function getJwtTokenWithSDK() {
       signature,
     }),
   });
+  logPredict429(jwtRes, { operation: "获取 JWT", method: "POST", url: authUrl });
 
   if (!jwtRes.ok) {
     const text = await jwtRes.text();

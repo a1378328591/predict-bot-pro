@@ -11,6 +11,7 @@
     "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
     "execute:btc:z": "node src/btc/zScoreOrderExecutor.js",
     "reconcile:btc:z": "node src/btc/reconcileZScorePaperSignals.js",
+    "check:rate-limit": "node scripts/check-rate-limit.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
