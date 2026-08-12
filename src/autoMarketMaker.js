@@ -58,6 +58,8 @@ const ORDER_RATIO = 0.99; // 使用余额的99%
 const MAX_ORDER_USD = 400; // 单笔买单最多使用金额
 const CHECK_INTERVAL_MS = 8 * 60_000; // 3分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 20 * 60_000; // 每20分钟撤掉现有挂单，避免长期排队被顶在后面
+const LOW_OPEN_ORDERS_INTERVAL_MS = 30_000; // 每30秒探测一次挂单数量，避免被塞单后长时间不补挂
+const LOW_OPEN_ORDERS_THRESHOLD = 15; // OPEN挂单少于15笔时请求立即补挂
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 4_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
@@ -108,6 +110,8 @@ const VOLATILE_MARKET_KEYWORDS = [
   "challengers",
   "academy",
   "lck-cl",
+  "chair",
+  "fed",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
@@ -960,6 +964,20 @@ async function getOpenOrders(throwOnError = false) {
     if (throwOnError) throw e;
     return [];
   }
+}
+
+async function probeOpenOrders() {
+  const jwt = await getJwtTokenWithSDK();
+  const query = new URLSearchParams({ status: "OPEN", first: String(LOW_OPEN_ORDERS_THRESHOLD) });
+  const url = "https://api.predict.fun/v1/orders?" + query.toString();
+  const res = await fetch(url, {
+    headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+  });
+  logPredict429(res, { operation: "探测挂单数量", url });
+  if (!res.ok) throw new Error("orders status " + res.status);
+  const json = await res.json();
+  if (!Array.isArray(json.data)) throw new Error("orders data is not an array");
+  return json.data;
 }
 
 function getOrderLatestAt(order) {
@@ -2115,6 +2133,24 @@ async function hourlyCancelLoop() {
   }
 }
 
+async function lowOpenOrdersMonitorLoop() {
+  while (true) {
+    await new Promise(r => setTimeout(r, LOW_OPEN_ORDERS_INTERVAL_MS));
+
+    if (hourlyCancelRunning) continue;
+
+    try {
+      const openOrders = await probeOpenOrders();
+      if (openOrders.length >= LOW_OPEN_ORDERS_THRESHOLD) continue;
+
+      requestPlacementAfterTimedCancel();
+      console.log("🔄 OPEN挂单不足" + LOW_OPEN_ORDERS_THRESHOLD + "笔，已请求立即补挂 openOrders=" + openOrders.length);
+    } catch (e) {
+      console.log("⚠️ 挂单数量探测失败:", e.message);
+    }
+  }
+}
+
 async function refreshStartTimes() {
   const markets = [...latestMarketsById.values()];
   if (!markets.length) return { markets: 0, refreshed: 0 };
@@ -2327,6 +2363,7 @@ async function main() {
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
   hourlyCancelLoop().catch(e => console.error("💥 小时撤单停止:", e));
+  lowOpenOrdersMonitorLoop().catch(e => console.error("💥 挂单数量探测停止:", e));
   positionMonitorLoop().catch(e => console.error("💥 持仓监控停止:", e));
   startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
