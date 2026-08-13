@@ -7,7 +7,7 @@ import { getJwtTokenWithSDK } from "./getJwtTokenWithSDK.js";
 
 const { PREDICT_API_KEY, PRIVY_PRIVATE_KEY, PREDICT_ACCOUNT, RPC_URL } = process.env;
 
-const MARKET_TYPE = process.env.MARKET_TYPE === "dota2" ? "dota2" : "soccer";
+const MARKET_TYPE = process.argv.includes("--market-type=dota2") ? "dota2" : "soccer";
 const MARKET_LABEL = MARKET_TYPE === "dota2" ? "Dota 2" : "足球";
 const LOG_FILE = MARKET_TYPE === "dota2" ? "dota2MarketMaker.log" : "soccerMarketMaker.log";
 const originalLog = console.log.bind(console);
@@ -32,6 +32,10 @@ const ORDER_RATIO = 0.99; // 使用余额的99%
 const MAX_ORDER_USD = 800; // 足球策略单笔最多使用金额
 const CHECK_INTERVAL_MS = 120_000; // 2分钟执行一轮挂单
 const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
+const ENABLE_PERIODIC_BUY_CANCEL = process.env.ENABLE_PERIODIC_BUY_CANCEL === "true"
+  || (process.env.ENABLE_PERIODIC_BUY_CANCEL !== "false" && MARKET_TYPE === "soccer");
+const LOW_OPEN_ORDERS_INTERVAL_MS = 30_000;
+const LOW_OPEN_ORDERS_THRESHOLD = 15;
 const MONITOR_INTERVAL_MS = 3_000; // 高频撤单监控
 const POSITION_MONITOR_INTERVAL_MS = 3_000; // 高频持仓平仓监控
 const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
@@ -50,6 +54,7 @@ const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/
 const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按卖一退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
+const ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS = 60_000;
 const BLOCKED_MARKETS_FILE = MARKET_TYPE === "dota2" ? "dota2BlockedMarkets.json" : "soccerBlockedMarkets.json";
 const WORLD_CUP_TAG_IDS = "113,81"; // World Cup, World Cup 2026
 const DOTA2_MARKET_VARIANT = "ESPORTS_DOTA2";
@@ -124,10 +129,14 @@ let latestActiveRewardMarketsFetchedAt = 0;
 const latestStartTimesByMarketId = new Map();
 let latestOpenOrders = [];
 let latestOpenOrdersFetchedAt = 0;
+const zeroCostOrderDiagnosticsFetchedAt = new Map();
+const zeroCostRecoveredBuyPrices = new Map();
 let monitorRunning = false;
 let hourlyCancelRunning = false;
 let positionMonitorRunning = false;
 let startTimeRefreshRunning = false;
+let placementRefreshRequested = false;
+let wakePlacementLoop = null;
 const closingPositions = new Set();
 const closePositionCooldowns = new Map();
 const pendingCloseOrders = new Map();
@@ -136,6 +145,30 @@ let monitorLoopCount = 0;
 let hourlyCancelLoopCount = 0;
 let positionMonitorLoopCount = 0;
 let startTimeRefreshLoopCount = 0;
+
+function requestPlacementRefresh() {
+  placementRefreshRequested = true;
+  wakePlacementLoop?.();
+}
+
+function waitForNextPlacementCycle() {
+  if (placementRefreshRequested) return Promise.resolve(true);
+
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => finish(false), CHECK_INTERVAL_MS);
+    const wake = () => finish(true);
+    const finish = triggered => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (wakePlacementLoop === wake) wakePlacementLoop = null;
+      resolve(triggered);
+    };
+    wakePlacementLoop = wake;
+    if (placementRefreshRequested) wake();
+  });
+}
 
 function loadBlockedMarkets() {
   try {
@@ -374,9 +407,24 @@ function getPositionQuantityWei(pos) {
 }
 
 function getPositionBuyPrice(pos) {
-  const price = Number(pos?.averageBuyPriceUsd);
-  if (Number.isFinite(price) && price > 0 && price <= 1) return price;
-  if (Number.isFinite(price) && price > 1 && price <= 100) return price / 100;
+  const averageBuyPriceUsd = Number(pos?.averageBuyPriceUsd);
+  if (Number.isFinite(averageBuyPriceUsd) && averageBuyPriceUsd > 0 && averageBuyPriceUsd <= 1) return averageBuyPriceUsd;
+  if (Number.isFinite(averageBuyPriceUsd) && averageBuyPriceUsd > 1 && averageBuyPriceUsd <= 100) return averageBuyPriceUsd / 100;
+
+  const candidates = [
+    pos?.averagePrice,
+    pos?.averageEntryPrice,
+    pos?.avgPrice,
+    pos?.avgEntryPrice,
+    pos?.entryPrice,
+    pos?.entryPricePerShare,
+    pos?.price,
+    pos?.costBasisPrice,
+  ];
+  for (const value of candidates) {
+    const price = Number(value);
+    if (Number.isFinite(price) && price > 0 && price <= 1) return price;
+  }
   return null;
 }
 
@@ -765,6 +813,72 @@ async function getOpenOrders(throwOnError = false) {
   } catch (e) {
     if (throwOnError) throw e;
     return [];
+  }
+}
+
+async function probeOpenOrders() {
+  const jwt = await getJwtTokenWithSDK();
+  const query = new URLSearchParams({ status: "OPEN", first: String(LOW_OPEN_ORDERS_THRESHOLD) });
+  const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+    headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+  });
+  if (!res.ok) throw new Error("orders status " + res.status);
+  const json = await res.json();
+  if (!Array.isArray(json.data)) throw new Error("orders data is not an array");
+  return json.data;
+}
+
+function getOrderLatestAt(order) {
+  return getFirstValidDate([
+    order?.filledAt, order?.matchedAt, order?.completedAt, order?.updatedAt, order?.createdAt,
+    order?.order?.filledAt, order?.order?.matchedAt, order?.order?.completedAt, order?.order?.updatedAt, order?.order?.createdAt,
+  ]);
+}
+
+function getZeroCostRecoveredBuyPrice(marketId, tokenId) {
+  const cached = zeroCostRecoveredBuyPrices.get(String(marketId) + "-" + String(tokenId));
+  const price = Number(cached?.price);
+  return Number.isFinite(price) && price > 0 && price <= 1 ? price : null;
+}
+
+async function refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId) {
+  const key = String(marketId) + "-" + String(tokenId);
+  if (Date.now() - (zeroCostOrderDiagnosticsFetchedAt.get(key) ?? 0) < ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS) return;
+  zeroCostOrderDiagnosticsFetchedAt.set(key, Date.now());
+
+  try {
+    const jwt = await getJwtTokenWithSDK();
+    const orders = [];
+    let after = null;
+    const seenCursors = new Set();
+    while (true) {
+      const query = new URLSearchParams({ status: "FILLED", first: "200" });
+      if (after) query.set("after", after);
+      const res = await fetch("https://api.predict.fun/v1/orders?" + query.toString(), {
+        headers: { "x-api-key": PREDICT_API_KEY, "Authorization": "Bearer " + jwt }
+      });
+      if (!res.ok) throw new Error("filled orders status " + res.status);
+      const json = await res.json();
+      const pageOrders = json.data || [];
+      orders.push(...pageOrders);
+      if (!json.cursor || pageOrders.length === 0 || seenCursors.has(json.cursor)) break;
+      seenCursors.add(json.cursor);
+      after = json.cursor;
+    }
+
+    const latest = orders
+      .filter(order => getOrderSide(order) === "BUY" && String(getOrderMarketId(order)) === String(marketId))
+      .filter(order => String(getOrderTokenId(order)) === String(tokenId) || (outcomeId && String(getOrderOutcomeId(order)) === String(outcomeId)))
+      .sort((a, b) => (getOrderLatestAt(b)?.getTime() ?? 0) - (getOrderLatestAt(a)?.getTime() ?? 0))[0];
+    const price = getOrderPrice(latest);
+    if (price && price > 0 && price <= 1) {
+      zeroCostRecoveredBuyPrices.set(key, { price, recoveredAt: new Date().toISOString(), orderId: getOrderId(latest) });
+      console.log("🔎 已从成交买单恢复成本价 marketId=" + marketId + " tokenId=" + tokenId + " price=" + price.toFixed(6));
+    } else {
+      console.log("⚠️ 成本价为0且未找到有效成交买单 marketId=" + marketId + " tokenId=" + tokenId);
+    }
+  } catch (e) {
+    console.log("⚠️ 成本价为0订单诊断失败 marketId=" + marketId + " tokenId=" + tokenId + " error=" + e.message);
   }
 }
 
@@ -1248,10 +1362,15 @@ async function closeSinglePosition(pos, openOrders) {
       console.log("🧹 检测到持仓，已撤对应买单 marketId=" + marketId + " tokenId=" + tokenId + " orders=" + cancelled);
     }
 
-    const buyPrice = getPositionBuyPrice(pos);
+    const hasZeroAverageBuyPriceUsd = pos?.averageBuyPriceUsd !== undefined
+      && pos?.averageBuyPriceUsd !== null
+      && pos?.averageBuyPriceUsd !== ""
+      && Number(pos.averageBuyPriceUsd) === 0;
+    if (hasZeroAverageBuyPriceUsd) void refreshZeroCostPositionBuyPrice(marketId, tokenId, outcomeId);
+    const buyPrice = getPositionBuyPrice(pos) ?? (hasZeroAverageBuyPriceUsd ? getZeroCostRecoveredBuyPrice(marketId, tokenId) : null);
     console.log("🔎 持仓字段 marketId=" + marketId + " tokenId=" + tokenId + " info=" + JSON.stringify(getPositionDebugInfo(pos), (_, value) => typeof value === "bigint" ? value.toString() : value));
     if (!buyPrice) {
-      console.log("⚠️ 无法识别持仓成本价，放弃平仓 marketId=" + marketId + " tokenId=" + tokenId);
+      console.log("⚠️ 无法识别持仓成本价，等待成交订单恢复成本价 marketId=" + marketId + " tokenId=" + tokenId);
       return;
     }
 
@@ -1559,12 +1678,29 @@ async function hourlyCancelLoop() {
       openOrdersCount = openOrders.length;
       cancelIdsCount = orderIds.length;
       hourlyCancelLoopCount++;
-      await cancelOrders(orderIds, "每小时刷新买单，避免长期排队");
+      const cancelled = await cancelOrders(orderIds, "每小时刷新买单，避免长期排队");
+      if (cancelled > 0) requestPlacementRefresh();
     } catch (e) {
       console.log("⚠️ 小时撤单异常:", e.message);
     } finally {
       hourlyCancelRunning = false;
       if (cancelIdsCount > 0) logElapsed("小时撤单结束", loopStartedAt, "openOrders=" + openOrdersCount + " ids=" + cancelIdsCount);
+    }
+  }
+}
+
+async function lowOpenOrdersMonitorLoop() {
+  while (true) {
+    await new Promise(r => setTimeout(r, LOW_OPEN_ORDERS_INTERVAL_MS));
+    if (hourlyCancelRunning) continue;
+    try {
+      const openOrders = await probeOpenOrders();
+      if (openOrders.length < LOW_OPEN_ORDERS_THRESHOLD) {
+        requestPlacementRefresh();
+        console.log("🔄 OPEN挂单不足" + LOW_OPEN_ORDERS_THRESHOLD + "笔，已请求立即补挂 openOrders=" + openOrders.length);
+      }
+    } catch (e) {
+      console.log("⚠️ 挂单数量探测失败:", e.message);
     }
   }
 }
@@ -1799,11 +1935,15 @@ async function main() {
   console.log("📊 " + MARKET_LABEL + "开放市场 | 💰 " + (ORDER_RATIO*100) + "%余额");
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
-  hourlyCancelLoop().catch(e => console.error("💥 小时撤单停止:", e));
+  if (ENABLE_PERIODIC_BUY_CANCEL) {
+    hourlyCancelLoop().catch(e => console.error("💥 小时撤单停止:", e));
+  }
+  lowOpenOrdersMonitorLoop().catch(e => console.error("💥 挂单数量探测停止:", e));
   positionMonitorLoop().catch(e => console.error("💥 持仓监控停止:", e));
   startTimeRefreshLoop().catch(e => console.error("💥 开赛时间刷新停止:", e));
 
   while (true) {
+    placementRefreshRequested = false;
     const mainLoopStartedAt = Date.now();
     try {
       // 1. 获取余额
@@ -1812,7 +1952,8 @@ async function main() {
       if (balance < 1n * 10n ** 18n) {
         console.log("⚠️ 余额不足，等待...");
         logElapsed("主循环结束", mainLoopStartedAt, "reason=余额不足 balance=" + balUsdt.toFixed(2));
-        await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
+        const wokeForRefresh = await waitForNextPlacementCycle();
+        if (wokeForRefresh) console.log("🔄 收到补挂信号，立即开始下一轮");
         continue;
       }
 
@@ -1851,7 +1992,8 @@ async function main() {
       logElapsed("主循环结束", mainLoopStartedAt, "error=" + e.message);
     }
 
-    await new Promise(r => setTimeout(r, CHECK_INTERVAL_MS));
+    const wokeForRefresh = await waitForNextPlacementCycle();
+    if (wokeForRefresh) console.log("🔄 收到补挂信号，立即开始下一轮");
   }
 }
 

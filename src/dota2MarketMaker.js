@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 
-const child = spawn(process.execPath, ["src/soccerMarketMaker.js"], {
+const MARKET_TYPE = "dota2";
+
+const child = spawn(process.execPath, ["src/soccerMarketMaker.js", "--market-type=" + MARKET_TYPE], {
   cwd: process.cwd(),
-  env: { ...process.env, MARKET_TYPE: "dota2" },
   stdio: "inherit",
 });
 
