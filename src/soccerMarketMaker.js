@@ -29,9 +29,9 @@ console.error = (...args) => {
 
 // ======== 配置 ========
 const ORDER_RATIO = 0.99; // 使用余额的99%
-const MAX_ORDER_USD = 800; // 足球策略单笔最多使用金额
+const MAX_ORDER_USD = 100; // 足球策略单笔最多使用金额
 const CHECK_INTERVAL_MS = 120_000; // 2分钟执行一轮挂单
-const HOURLY_CANCEL_INTERVAL_MS = 15 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
+const HOURLY_CANCEL_INTERVAL_MS = 150 * 60_000; // 每15分钟撤掉现有挂单，避免长期排队被顶在后面
 const ENABLE_PERIODIC_BUY_CANCEL = process.env.ENABLE_PERIODIC_BUY_CANCEL === "true"
   || (process.env.ENABLE_PERIODIC_BUY_CANCEL !== "false" && MARKET_TYPE === "soccer");
 const LOW_OPEN_ORDERS_INTERVAL_MS = 30_000;
@@ -42,16 +42,17 @@ const START_TIME_REFRESH_INTERVAL_MS = 60_000; // 低频刷新开赛时间
 const MARKET_DELAY_MS = 100; // 每个市场之间等待100ms
 const OUTCOME_DELAY_MS = 50; // 同一市场每个outcome之间等待50ms
 const MARKET_PAGE_SIZE = 100; // 分页拉取全部开放市场
-const MIN_BUY_PRICE = 0.15; // 低于15不挂买单
-const POLY_MIN_BID_USD = 500; // Polymarket 买一金额低于该值不挂/撤单
-const PREDICT_MIN_BID_USD = 100; // Predict 买一金额低于该值不挂/撤单
-const PREDICT_MIN_ASK_USD = 100; // Predict 卖一金额低于该值不挂/平仓
-const MIN_BUY_SHARES = 100; // 本次买单份额低于100不挂，等于100可挂
+const MIN_BUY_PRICE = 0.10; // 低于15不挂买单
+const POLY_MIN_BID_USD = 20; // Polymarket 买一金额低于该值不挂/撤单
+const PREDICT_MIN_BID_USD = 0; // Predict 买一金额低于该值不挂/撤单
+const PREDICT_MIN_ASK_USD = 0; // Predict 卖一金额低于该值不挂/平仓
+const MIN_BUY_SHARES = 1; // 本次买单份额低于100不挂，等于100可挂
+const REQUIRE_PREDICT_ASK_COVERAGE = MARKET_TYPE === "soccer";
 const ORDER_AMOUNT_REFRESH_DIFF_USD = 5; // 已有买单金额和当前目标金额差距超过5u则撤单重挂
-const MIN_REWARD_HOURLY_RATE = 100; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
+const MIN_REWARD_HOURLY_RATE = 0; // Predict 积分每小时低于该值不挂/撤单，设为0则不限制
 const PRICE_TOLERANCE = 0.001; // Predict 高于 Polymarket 时允许的误差
-const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/撤单/限价退出
-const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按卖一退出，允许亏损
+const EXPIRE_BEFORE_START_MS = 1 * 60 * 1000; // 开赛前10分钟订单失效/撤单/限价退出
+const CLOSE_BEFORE_START_MS = 1 * 60 * 1000; // 开赛前20分钟持仓按卖一退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS = 60_000;
@@ -1880,7 +1881,7 @@ async function processMarket(market, amountWei, existingOrders) {
       skipOrders++;
       continue;
     }
-    if (predictAskLevel.size < quantity) {
+    if (REQUIRE_PREDICT_ASK_COVERAGE && predictAskLevel.size < quantity) {
       skipOrders++;
       continue;
     }
