@@ -7,7 +7,9 @@ import { getJwtTokenWithSDK } from "./getJwtTokenWithSDK.js";
 
 const { PREDICT_API_KEY, PRIVY_PRIVATE_KEY, PREDICT_ACCOUNT, RPC_URL } = process.env;
 
-const LOG_FILE = "soccerMarketMaker.log";
+const MARKET_TYPE = process.env.MARKET_TYPE === "dota2" ? "dota2" : "soccer";
+const MARKET_LABEL = MARKET_TYPE === "dota2" ? "Dota 2" : "足球";
+const LOG_FILE = MARKET_TYPE === "dota2" ? "dota2MarketMaker.log" : "soccerMarketMaker.log";
 const originalLog = console.log.bind(console);
 const originalError = console.error.bind(console);
 
@@ -48,8 +50,10 @@ const EXPIRE_BEFORE_START_MS = 10 * 60 * 1000; // 开赛前10分钟订单失效/
 const CLOSE_BEFORE_START_MS = 20 * 60 * 1000; // 开赛前20分钟持仓按卖一退出，允许亏损
 const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单失效/撤单
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
-const BLOCKED_MARKETS_FILE = "soccerBlockedMarkets.json";
+const BLOCKED_MARKETS_FILE = MARKET_TYPE === "dota2" ? "dota2BlockedMarkets.json" : "soccerBlockedMarkets.json";
 const WORLD_CUP_TAG_IDS = "113,81"; // World Cup, World Cup 2026
+const DOTA2_MARKET_VARIANT = "ESPORTS_DOTA2";
+const THE_INTERNATIONAL_TAG_ID = "850";
 const VOLATILE_MARKET_KEYWORDS = [
   "bitcoin",
   "btc",
@@ -195,7 +199,7 @@ function getBlockedMarketReason(market) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  if (isSoccerMarket(market)) return null;
+  if (isTargetMarket(market)) return null;
   if (hasCompanyRankingPattern(text)) return "公司/市值排名市场";
   const politicalKeyword = getPoliticalKeyword(text);
   if (politicalKeyword) return "政治/地缘政治关键词: " + politicalKeyword;
@@ -465,9 +469,13 @@ async function getMarkets() {
         first: String(MARKET_PAGE_SIZE),
         status: "OPEN",
         hasActiveRewards: "true",
-        tagIds: WORLD_CUP_TAG_IDS,
         sort: "REWARD_RATE_DESC",
       });
+      if (MARKET_TYPE === "soccer") query.set("tagIds", WORLD_CUP_TAG_IDS);
+      if (MARKET_TYPE === "dota2") {
+        query.set("marketVariant", DOTA2_MARKET_VARIANT);
+        query.set("tagIds", THE_INTERNATIONAL_TAG_ID);
+      }
       if (after) query.set("after", after);
 
       const url = "https://api.predict.fun/v1/markets?" + query.toString();
@@ -478,7 +486,7 @@ async function getMarkets() {
 
       for (const market of pageMarkets) {
         activeRewardMarketIds.add(String(market.id));
-        if (isSoccerMarket(market) && !getBlockedMarketReason(market) && !getLowRewardRateReason(market) && market.polymarketConditionIds?.length) {
+        if (isTargetMarket(market) && !getBlockedMarketReason(market) && !getLowRewardRateReason(market) && market.polymarketConditionIds?.length) {
           markets.push(market);
         }
       }
@@ -635,11 +643,14 @@ function isSportsLikeMarket(market) {
   return text.includes("sport") || text.includes("esport") || text.includes("nba") || text.includes("nfl") || text.includes("nhl") || text.includes("mlb") || text.includes("ufc") || text.includes("soccer") || text.includes("football") || text.includes("league") || text.includes("dota") || text.includes("cs2") || text.includes("valorant");
 }
 
-function isSoccerMarket(market) {
+function isTargetMarket(market) {
   const text = [market?.categorySlug, market?.marketType, market?.marketVariant, market?.title, market?.question, market?.description, market?.imageUrl]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+  if (MARKET_TYPE === "dota2") {
+    return market?.marketVariant === DOTA2_MARKET_VARIANT;
+  }
   if (text.includes("nfl") || text.includes("ncaa football") || text.includes("american football")) return false;
   return text.includes("soccer")
     || text.includes("fifa")
@@ -1122,8 +1133,8 @@ async function rememberFilledMarkets() {
       if (bal > 0n) {
         const marketId = pos.market?.id ?? pos.marketId;
         const market = latestMarketsById.get(String(marketId)) ?? pos.market;
-        if (!market || !isSoccerMarket(market)) continue;
-        console.log("🔎 检测到足球持仓 marketId=" + marketId + " tokenId=" + getPositionTokenId(pos) + " balance=" + bal.toString());
+        if (!market || !isTargetMarket(market)) continue;
+        console.log("🔎 检测到" + MARKET_LABEL + "持仓 marketId=" + marketId + " tokenId=" + getPositionTokenId(pos) + " balance=" + bal.toString());
       }
     }
   } catch (e) {}
@@ -1218,7 +1229,7 @@ async function closeSinglePosition(pos, openOrders) {
   try {
     closingPositions.add(closeKey);
     const market = latestMarketsById.get(String(marketId)) ?? pos.market;
-    if (market && !isSoccerMarket(market)) return;
+    if (market && !isTargetMarket(market)) return;
 
     const outcome = getPositionOutcome(market, pos, tokenId, outcomeId);
     if (!market || !outcome) {
@@ -1252,7 +1263,8 @@ async function closeSinglePosition(pos, openOrders) {
       return;
     }
 
-    const urgentCloseReason = getCloseUrgencyReason(market);
+    // Dota 2 开赛只停止新买入；已有仓位继续用非吃单限价卖单等待成交。
+    const urgentCloseReason = MARKET_TYPE === "dota2" ? null : getCloseUrgencyReason(market);
     const closePrice = getCloseSellPriceWei({ market, buyPrice, bestBid, bestAsk, urgentCloseReason });
     const sellPriceWei = closePrice.sellPriceWei;
     if (sellPriceWei <= 0n) return;
@@ -1274,10 +1286,10 @@ async function closeSinglePosition(pos, openOrders) {
       pendingCloseOrders.delete(closeKey);
     }
 
-    console.log("🔎 足球平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
+    console.log("🔎 " + MARKET_LABEL + "平仓监控检测到持仓 marketId=" + marketId + " tokenId=" + tokenId + " quantityWei=" + quantityWei.toString());
     const quantity = Number(quantityWei) / 1e18;
-    console.log("📤 足球持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
-    const expiresAt = getRewardCancelAt(market) ?? undefined;
+    console.log("📤 " + MARKET_LABEL + "持仓限价卖 marketId=" + marketId + " tokenId=" + tokenId + " qty=" + quantity.toFixed(4) + " buyPrice=" + buyPrice.toFixed(6) + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null") + " ask=" + Number(bestAsk.price).toFixed(6) + " sellPrice=" + sellPrice.toFixed(6) + " reason=" + closePrice.reason);
+    const expiresAt = MARKET_TYPE === "dota2" ? undefined : getRewardCancelAt(market) ?? undefined;
     const sellOrder = await placeSellLimit(market, tokenId, sellPriceWei, quantityWei, expiresAt);
     rememberPendingCloseOrder(closeKey, sellOrder, marketId, tokenId, outcomeId, sellPrice, quantityWei);
   } catch (e) {
@@ -1359,9 +1371,9 @@ async function monitorSingleOrder(order, openOrders, predictBidCache) {
     const orderSide = getOrderSide(order);
     const orderPrice = getOrderPrice(order);
 
-    if (market && !isSoccerMarket(market)) {
+    if (market && !isTargetMarket(market)) {
       if (orderSide === "BUY") {
-        await cancelOrder(orderId, "非足球市场 marketId=" + marketId + " title=" + marketTitle);
+        await cancelOrder(orderId, "非" + MARKET_LABEL + "市场 marketId=" + marketId + " title=" + marketTitle);
       }
       return;
     }
@@ -1783,8 +1795,8 @@ async function processMarket(market, amountWei, existingOrders) {
 
 // 主循环
 async function main() {
-  console.log("\n🤖 Predict.fun 自动做市机器人启动");
-  console.log("📊 全部开放市场 | 💰 " + (ORDER_RATIO*100) + "%余额 | ⏰ 5m | 🚫过滤BTC");
+  console.log("\n🤖 Predict.fun " + MARKET_LABEL + "自动做市机器人启动");
+  console.log("📊 " + MARKET_LABEL + "开放市场 | 💰 " + (ORDER_RATIO*100) + "%余额");
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
   hourlyCancelLoop().catch(e => console.error("💥 小时撤单停止:", e));

@@ -55,11 +55,21 @@ query GetLeaderboardUserStats($address: Address!) {
     const json = await res.json();
 
     if (json.errors) {
+        console.error("GraphQL errors:", JSON.stringify(json.errors, null, 2));
         throw new Error(JSON.stringify(json.errors));
     }
 
-    if (!json.data?.account?.leaderboard) {
-        throw new Error("未获取到 leaderboard 数据");
+    if (!json.data?.account) {
+        console.error("GraphQL response:", JSON.stringify(json, null, 2));
+        throw new Error("接口未返回 account 数据");
+    }
+
+    if (!json.data.account.leaderboard) {
+        console.error(
+            "account fields:",
+            Object.keys(json.data.account).join(", ")
+        );
+        throw new Error("account 未返回 leaderboard 数据");
     }
 
     return json.data.account.leaderboard;

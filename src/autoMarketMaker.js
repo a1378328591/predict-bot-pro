@@ -112,6 +112,7 @@ const VOLATILE_MARKET_KEYWORDS = [
   "lck-cl",
   "chair",
   "fed",
+  "gpt",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [

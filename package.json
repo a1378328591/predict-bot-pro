@@ -6,12 +6,14 @@
   "type": "module",
   "scripts": {
     "market-maker": "node src/autoMarketMaker.js",
+    "market-maker:dota2": "node src/dota2MarketMaker.js",
     "monitor:temperature": "node src/temperature/monitorShanghaiHighTemperature.js",
     "collect:btc": "node src/btc/collectBtcSamples.js",
     "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
     "execute:btc:z": "node src/btc/zScoreOrderExecutor.js",
     "reconcile:btc:z": "node src/btc/reconcileZScorePaperSignals.js",
     "check:rate-limit": "node scripts/check-rate-limit.js",
+    "find:leaderboard-balance": "node src/findLeaderboardBalance.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
