@@ -23,6 +23,14 @@ const level = (items, ask) => {
   levels.sort((a, b) => ask ? a.price - b.price : b.price - a.price);
   return levels[0] ?? null;
 };
+const levels = (items, ask) => {
+  const result = (items || []).map(item => ({
+    price: Number(item.price ?? item[0]),
+    size: Number(item.size ?? item.quantity ?? item.shares ?? item[1]),
+  })).filter(item => Number.isFinite(item.price) && Number.isFinite(item.size));
+  result.sort((a, b) => ask ? a.price - b.price : b.price - a.price);
+  return result;
+};
 async function fetchJson(url, options = {}) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -93,10 +101,19 @@ const marketResults = await mapLimit(markets, 6, async market => {
     const tokenId = polyTokens[index];
     if (!tokenId) { item.reason = "pmTokenMapping"; result.outcomes.push(item); continue; }
     const book = await fetchJson("https://clob.polymarket.com/book?token_id=" + encodeURIComponent(tokenId));
-    const polyBid = level(book?.bids, false);
+    const polyBids = levels(book?.bids, false);
+    const polyBid = polyBids[0];
     if (!polyBid) item.reason = "pmNoBid";
-    else if (polyBid.price * polyBid.size < cfg.minPolyUsd) item.reason = "pmBidDepth";
     else {
+      item.pmBid = polyBid.price;
+      item.pmBidSize = polyBid.size;
+      item.pmBidUsd = polyBid.price * polyBid.size;
+      item.pmBid2 = polyBids[1]?.price ?? null;
+      item.pmBid2Size = polyBids[1]?.size ?? null;
+      item.pmBid2Usd = polyBids[1] ? polyBids[1].price * polyBids[1].size : null;
+    }
+    if (polyBid && polyBid.price * polyBid.size < cfg.minPolyUsd) item.reason = "pmBidDepth";
+    else if (polyBid) {
       let bid = directBid;
       let ask = directAsk;
       const position = (market.outcomes || []).findIndex(value => String(value.onChainId) === String(outcome.onChainId));
@@ -114,8 +131,6 @@ const marketResults = await mapLimit(markets, 6, async market => {
       item.predictBid = bid?.price;
       item.predictAsk = ask?.price;
       item.predictAskSize = ask?.size;
-      item.pmBid = polyBid.price;
-      item.pmBidUsd = polyBid.price * polyBid.size;
     }
     result.outcomes.push(item);
   }
@@ -125,7 +140,22 @@ const marketResults = await mapLimit(markets, 6, async market => {
   return result;
 });
 const counts = {};
+const lowPmBids = [];
 for (const market of marketResults) {
-  for (const outcome of market.outcomes || []) counts[outcome.reason] = (counts[outcome.reason] || 0) + 1;
+  for (const outcome of market.outcomes || []) {
+    counts[outcome.reason] = (counts[outcome.reason] || 0) + 1;
+    if (outcome.reason === "pmBidDepth" && outcome.pmBidUsd < 10) lowPmBids.push({
+      marketId: market.id,
+      event: market.event,
+      question: market.question,
+      outcome: outcome.outcome,
+      pmBid: outcome.pmBid ?? null,
+      pmBidSize: outcome.pmBidSize ?? null,
+      pmBidUsd: outcome.pmBidUsd ?? null,
+      pmBid2: outcome.pmBid2 ?? null,
+      pmBid2Size: outcome.pmBid2Size ?? null,
+      pmBid2Usd: outcome.pmBid2Usd ?? null,
+    });
+  }
 }
-console.log(JSON.stringify({ config: cfg, marketCount: markets.length, outcomeReasonCounts: counts, markets: marketResults }, null, 2));
+console.log(JSON.stringify({ config: cfg, marketCount: markets.length, outcomeReasonCounts: counts, lowPmBids, markets: marketResults }, null, 2));

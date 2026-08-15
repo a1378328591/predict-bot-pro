@@ -84,6 +84,21 @@ const EXPIRE_BEFORE_REWARD_END_MS = 60 * 1000; // 积分结束前1分钟订单�
 const POLY_MARKET_CACHE_TTL_MS = 30_000; // PM市场缓存30秒，避免错过开赛时间更新
 const ZERO_COST_ORDER_DIAGNOSTIC_INTERVAL_MS = 60_000; // 成本价异常时，单个持仓最多每分钟查询一次已成交订单
 const BLOCKED_MARKETS_FILE = "blockedMarkets.json";
+// "model",
+// "IPO",
+// "OpenAI",
+// "ipo",
+// "openai",
+// "o/u",
+// "-1.5",
+// "-2.5",
+// "-3.5",
+// "challengers",
+// "academy",
+// "lck-cl",
+// "chair",
+// "fed",
+// "gpt",
 const VOLATILE_MARKET_KEYWORDS = [
   "bitcoin",
   "btc",
@@ -98,21 +113,8 @@ const VOLATILE_MARKET_KEYWORDS = [
   "ltc",
   "crypto",
   "cryptocurrency",
-  "model",
-  "IPO",
-  "OpenAI",
-  "ipo",
-  "openai",
-  "o/u",
-  "-1.5",
-  "-2.5",
-  "-3.5",
-  "challengers",
-  "academy",
-  "lck-cl",
-  "chair",
-  "fed",
-  "gpt",
+  "first blood",
+  "blood",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [

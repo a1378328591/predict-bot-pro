@@ -61,24 +61,8 @@ const WORLD_CUP_TAG_IDS = "113,81"; // World Cup, World Cup 2026
 const DOTA2_MARKET_VARIANT = "ESPORTS_DOTA2";
 const THE_INTERNATIONAL_TAG_ID = "850";
 const VOLATILE_MARKET_KEYWORDS = [
-  "bitcoin",
-  "btc",
-  "ethereum",
-  "eth",
-  "solana",
-  "sol",
-  "xrp",
-  "doge",
-  "dogecoin",
-  "litecoin",
-  "ltc",
-  "crypto",
-  "cryptocurrency",
-  "model",
-  "o/u",
-  "-1.5",
-  "-2.5",
-  "-3.5",
+  "first blood",
+  "blood",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
@@ -233,7 +217,7 @@ function getBlockedMarketReason(market) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  if (isTargetMarket(market)) return null;
+  if (MARKET_TYPE === "soccer" && isTargetMarket(market)) return null;
   if (hasCompanyRankingPattern(text)) return "公司/市值排名市场";
   const politicalKeyword = getPoliticalKeyword(text);
   if (politicalKeyword) return "政治/地缘政治关键词: " + politicalKeyword;
