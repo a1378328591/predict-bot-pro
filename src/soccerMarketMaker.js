@@ -1800,6 +1800,11 @@ async function processMarket(market, amountWei, existingOrders) {
     });
 
     if (existing) {
+      if (getOrderSide(existing) !== "BUY") {
+        skipOrders++;
+        continue;
+      }
+
       const existingAmountUsd = getOrderAmountUsd(existing);
       const targetAmountUsd = Number(amountWei) / 1e18;
       if (existingAmountUsd !== null && Math.abs(existingAmountUsd - targetAmountUsd) <= ORDER_AMOUNT_REFRESH_DIFF_USD) {
