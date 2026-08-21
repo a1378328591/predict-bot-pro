@@ -60,6 +60,7 @@ const BLOCKED_MARKETS_FILE = MARKET_TYPE === "dota2" ? "dota2BlockedMarkets.json
 const WORLD_CUP_TAG_IDS = "113,81"; // World Cup, World Cup 2026
 const DOTA2_MARKET_VARIANT = "ESPORTS_DOTA2";
 const THE_INTERNATIONAL_TAG_ID = "850";
+const SELL_QUANTITY_TOLERANCE_WEI = 1n * 10n ** 18n; // 1份，忽略持仓/挂单链上精度尾差
 const VOLATILE_MARKET_KEYWORDS = [
   "first blood",
   "blood",
@@ -1379,56 +1380,14 @@ async function closeSinglePosition(pos, openOrders) {
     }
 
     const openSellOrder = getOpenSellOrder(openOrders, marketId, tokenId, outcomeId);
-    try {
-      const relatedOrders = openOrders.filter(order => {
-        if (String(getOrderMarketId(order)) !== String(marketId)) return false;
-        const orderTokenId = getOrderTokenId(order);
-        const orderOutcomeId = getOrderOutcomeId(order);
-        return (orderTokenId && String(orderTokenId) === String(tokenId))
-          || (outcomeId && orderOutcomeId && String(orderOutcomeId) === String(outcomeId));
-      }).map(order => ({
-        id: getOrderId(order),
-        rawSide: order?.side ?? order?.order?.side ?? null,
-        normalizedSide: getOrderSide(order),
-        price: getOrderPrice(order),
-        quantity: getOrderQuantityWei(order) ? formatWei(getOrderQuantityWei(order)) : null,
-      }));
-      console.log(
-        "🔬 卖单识别诊断 marketId=" + marketId
-        + " tokenId=" + tokenId
-        + " outcome=" + (outcome.name || outcomeId || "")
-        + " openOrders=" + openOrders.length
-        + " relatedOrders=" + JSON.stringify(relatedOrders)
-        + " matchedSellOrderId=" + (getOrderId(openSellOrder) || "null")
-        + " matchedSellSide=" + (openSellOrder ? getOrderSide(openSellOrder) : "null")
-      );
-    } catch {}
     const openSellPrice = getOrderPrice(openSellOrder);
     const openSellQuantityWei = getOrderQuantityWei(openSellOrder);
-    if (openSellOrder && openSellPrice && Math.abs(openSellPrice - sellPrice) < 1e-9 && openSellQuantityWei && openSellQuantityWei >= quantityWei) return;
+    if (openSellOrder && openSellPrice && Math.abs(openSellPrice - sellPrice) < 1e-9 && openSellQuantityWei && openSellQuantityWei + SELL_QUANTITY_TOLERANCE_WEI >= quantityWei) return;
     const pendingCloseOrder = getPendingCloseOrder(closeKey);
-    if (pendingCloseOrder && Math.abs(pendingCloseOrder.price - sellPrice) < 1e-9 && pendingCloseOrder.quantityWei >= quantityWei) return;
+    if (pendingCloseOrder && Math.abs(pendingCloseOrder.price - sellPrice) < 1e-9 && pendingCloseOrder.quantityWei + SELL_QUANTITY_TOLERANCE_WEI >= quantityWei) return;
     if (openSellOrder) {
       const sellOrderId = getOrderId(openSellOrder);
       if (sellOrderId) {
-        try {
-          console.log(
-            "🧾 撤卖单诊断 marketId=" + marketId
-            + " title=" + (market?.question || market?.title || "")
-            + " outcome=" + (outcome.name || outcomeId || "")
-            + " orderId=" + sellOrderId
-            + " oldPrice=" + (openSellPrice === null ? "null" : openSellPrice.toFixed(6))
-            + " newPrice=" + sellPrice.toFixed(6)
-            + " buyPrice=" + buyPrice.toFixed(6)
-            + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null")
-            + " ask=" + (bestAsk ? Number(bestAsk.price).toFixed(6) : "null")
-            + " oldQty=" + (openSellQuantityWei ? formatWei(openSellQuantityWei) : "null")
-            + " newQty=" + formatWei(quantityWei)
-            + " priceChanged=" + String(!openSellPrice || Math.abs(openSellPrice - sellPrice) >= 1e-9)
-            + " quantityChanged=" + String(!openSellQuantityWei || openSellQuantityWei < quantityWei)
-            + " reason=持仓价格或份额变化，重挂限价卖"
-          );
-        } catch {}
         await cancelOrder(sellOrderId, "持仓价格或份额变化，重挂限价卖 marketId=" + marketId + " oldQty=" + (openSellQuantityWei?.toString() ?? "unknown") + " newQty=" + quantityWei.toString());
       }
       pendingCloseOrders.delete(closeKey);
@@ -1961,7 +1920,6 @@ async function processMarket(market, amountWei, existingOrders) {
 // 主循环
 async function main() {
   console.log("\n🤖 Predict.fun " + MARKET_LABEL + "自动做市机器人启动");
-  console.log("🧪 SELL_DIAGNOSTIC_VERSION=2026-08-21-02 marketType=" + MARKET_TYPE);
   console.log("📊 " + MARKET_LABEL + "开放市场 | 💰 " + (ORDER_RATIO*100) + "%余额");
   await initSDK();
   monitorLoop().catch(e => console.error("💥 高频监控停止:", e));
