@@ -1386,7 +1386,29 @@ async function closeSinglePosition(pos, openOrders) {
     if (pendingCloseOrder && Math.abs(pendingCloseOrder.price - sellPrice) < 1e-9 && pendingCloseOrder.quantityWei >= quantityWei) return;
     if (openSellOrder) {
       const sellOrderId = getOrderId(openSellOrder);
-      if (sellOrderId) await cancelOrder(sellOrderId, "持仓价格或份额变化，重挂限价卖 marketId=" + marketId + " oldQty=" + (openSellQuantityWei?.toString() ?? "unknown") + " newQty=" + quantityWei.toString());
+      if (sellOrderId) {
+        try {
+          console.log(
+            "🧾 撤卖单诊断 marketId=" + marketId
+            + " title=" + (market?.question || market?.title || "")
+            + " outcome=" + (outcome.name || outcomeId || "")
+            + " orderId=" + sellOrderId
+            + " rawSide=" + String(openSellOrder?.side ?? openSellOrder?.order?.side ?? "")
+            + " side=" + getOrderSide(openSellOrder)
+            + " oldPrice=" + (openSellPrice === null ? "null" : openSellPrice.toFixed(6))
+            + " newPrice=" + sellPrice.toFixed(6)
+            + " buyPrice=" + buyPrice.toFixed(6)
+            + " bid=" + (bestBid ? Number(bestBid.price).toFixed(6) : "null")
+            + " ask=" + (bestAsk ? Number(bestAsk.price).toFixed(6) : "null")
+            + " oldQty=" + (openSellQuantityWei ? formatWei(openSellQuantityWei) : "null")
+            + " newQty=" + formatWei(quantityWei)
+            + " priceChanged=" + String(!openSellPrice || Math.abs(openSellPrice - sellPrice) >= 1e-9)
+            + " quantityChanged=" + String(!openSellQuantityWei || openSellQuantityWei < quantityWei)
+            + " reason=持仓价格或份额变化，重挂限价卖"
+          );
+        } catch {}
+        await cancelOrder(sellOrderId, "持仓价格或份额变化，重挂限价卖 marketId=" + marketId + " oldQty=" + (openSellQuantityWei?.toString() ?? "unknown") + " newQty=" + quantityWei.toString());
+      }
       pendingCloseOrders.delete(closeKey);
     }
 
