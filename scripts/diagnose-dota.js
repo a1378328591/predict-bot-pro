@@ -1,8 +1,11 @@
-import "dotenv/config";
 import fetch from "node-fetch";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
-const headers = { "x-api-key": process.env.PREDICT_API_KEY };
+const apiKey = process.env.PREDICT_API_KEY;
+if (!apiKey) {
+  throw new Error("诊断需要显式传入进程环境变量 PREDICT_API_KEY；本脚本不会读取 .env");
+}
+const headers = { "x-api-key": apiKey };
 const proxyUrl = process.env.FICLASH_PROXY_URL || "http://127.0.0.1:7890";
 const proxyAgent = new HttpsProxyAgent(proxyUrl);
 const cfg = { amount: 100, minPrice: 0.10, tolerance: 0.001, minPolyUsd: 20 };

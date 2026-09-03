@@ -7,6 +7,9 @@
   "scripts": {
     "market-maker": "node src/autoMarketMaker.js",
     "market-maker:dota2": "node src/dota2MarketMaker.js",
+    "market-maker:dota2:in-game": "node src/dota2InGameMarketMaker.js",
+    "market-maker:sse": "node src/sseCompositeMarketMaker.js",
+    "market-maker:sse:direct": "node src/sseCompositeMarketMakerDirect.js",
     "monitor:temperature": "node src/temperature/monitorShanghaiHighTemperature.js",
     "collect:btc": "node src/btc/collectBtcSamples.js",
     "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
