@@ -19,8 +19,10 @@ const GRAPHQL_URL = "https://graphql.predict.fun/graphql";
 const RPC_URLS = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolean);
 // 直接实盘：真实提交 BUY、SELL 和撤单。
 const LIVE_TRADING = true;
-// 只按这个 category slug 选择市场。
-const CATEGORY_SLUG = "sse-composite-index-up-or-down-on-september-3-2026";
+// 只按这些 category slug 选择市场；每个 category 取一个 OPEN 市场。
+const CATEGORY_SLUG = [
+  "sse-composite-index-up-or-down-on-september-3-2026",
+];
 // 北京时间允许挂 BUY 的时段，24 小时制；当前为凌晨1点到早上7点。
 const QUOTE_WINDOWS = parseWindows("00:00-08:00");
 // 距离市场结束少于该分钟数后停止新挂 BUY，但继续维护 SELL。
@@ -69,8 +71,8 @@ const USE_MATCH_RISK = true;
 const LOG_FILE = "sseCompositeMarketMakerDirect.log";
 
 let orderBuilder;
-let lastMarket;
-let lastMatchStats = { fetchedAt: 0, trades: 0, shares: 0, maxShares: 0, error: null };
+const lastMarkets = new Map();
+const lastMatchStats = new Map();
 let rpcIndex = 0;
 let cycleRunning = false;
 let monitorRunning = false;
@@ -376,12 +378,23 @@ async function api(path, options = {}) {
   return body?.data ?? body;
 }
 
-async function getMarket() {
-  const category = await api(`/v1/categories/${encodeURIComponent(CATEGORY_SLUG)}`, { headers: apiHeaders() });
-  const markets = Array.isArray(category?.markets) ? category.markets : [];
-  const market = markets.find(item => String(item.tradingStatus || item.status).toUpperCase() === "OPEN") || markets[0];
-  if (!market) throw new Error(`类别没有市场: ${CATEGORY_SLUG}`);
-  return { ...market, category: { endsAt: category.endsAt } };
+async function getMarkets() {
+  const results = await Promise.all(CATEGORY_SLUG.map(async categorySlug => {
+    try {
+      const category = await api(`/v1/categories/${encodeURIComponent(categorySlug)}`, { headers: apiHeaders() });
+      const markets = Array.isArray(category?.markets) ? category.markets : [];
+      const market = markets.find(item => String(item.tradingStatus || item.status).toUpperCase() === "OPEN") || markets[0];
+      if (!market) {
+        log("⚠️ 类别没有市场", `category=${categorySlug}`);
+        return { categorySlug, market: null, unavailableReason: "类别没有市场" };
+      }
+      return { market: { ...market, category: { endsAt: category.endsAt }, categorySlug }, categorySlug, unavailableReason: null };
+    } catch (error) {
+      log("⚠️ 市场获取失败", `category=${categorySlug}`, error.message);
+      return { categorySlug, market: null, unavailableReason: `市场获取失败: ${error.message}` };
+    }
+  }));
+  return results;
 }
 
 async function getBook(marketId) {
@@ -450,7 +463,7 @@ function buyCostWei(price, shares) {
 
 async function cancelOrders(orders, reason) {
   const ids = [...new Set(orders
-    .filter(order => isCurrentMarket(orderMarketId(order)))
+    .filter(order => isConfiguredMarket(orderMarketId(order)))
     .map(orderId)
     .filter(Boolean)
     .map(String))]
@@ -500,9 +513,11 @@ async function createLimitOrder(market, side, tokenId, price, shares, expiresAt)
 }
 
 async function recentMatchStats(market) {
-  if (!USE_MATCH_RISK || Date.now() - lastMatchStats.fetchedAt < MATCH_REFRESH_MS) return lastMatchStats;
+  const key = String(market.id);
+  const cached = lastMatchStats.get(key) || { fetchedAt: 0, trades: 0, shares: 0, maxShares: 0, error: null };
+  if (!USE_MATCH_RISK || Date.now() - cached.fetchedAt < MATCH_REFRESH_MS) return cached;
   const query = `query GetMatchEventLog($filter: MatchEventLogFilterInput, $pagination: ForwardPaginationInput) { matchEventLog(filter: $filter, pagination: $pagination) { edges { node { timestamp amountFilled } } } }`;
-  const body = JSON.stringify({ query, variables: { pagination: { first: 100 }, filter: { marketId: String(market.id), categoryId: CATEGORY_SLUG || undefined } } });
+  const body = JSON.stringify({ query, variables: { pagination: { first: 100 }, filter: { marketId: String(market.id), categoryId: market.categorySlug || undefined } } });
   try {
     const response = await request(GRAPHQL_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body });
     const json = await response.json();
@@ -510,16 +525,17 @@ async function recentMatchStats(market) {
     const cutoff = Date.now() - 5 * 60_000;
     const rows = (json?.data?.matchEventLog?.edges || []).map(edge => edge.node).filter(row => new Date(row.timestamp).getTime() >= cutoff);
     const sizes = rows.map(row => Number(row.amountFilled) / 1e18).filter(Number.isFinite);
-    lastMatchStats = { fetchedAt: Date.now(), trades: sizes.length, shares: sizes.reduce((sum, value) => sum + value, 0), maxShares: Math.max(0, ...sizes), error: null };
+    const stats = { fetchedAt: Date.now(), trades: sizes.length, shares: sizes.reduce((sum, value) => sum + value, 0), maxShares: Math.max(0, ...sizes), error: null };
+    lastMatchStats.set(key, stats);
   } catch (error) {
-    lastMatchStats = { ...lastMatchStats, fetchedAt: Date.now(), error: error.message };
+    lastMatchStats.set(key, { ...cached, fetchedAt: Date.now(), error: error.message });
     log("⚠️ 成交风控查询失败", error.message);
   }
-  return lastMatchStats;
+  return lastMatchStats.get(key);
 }
 
 async function cancelBuyOrders(openOrders, reason) {
-  return cancelOrders(openOrders.filter(order => matchingOrder(order, lastMarket.id, orderTokenId(order), orderOutcomeId(order)) && orderSide(order) === "BUY"), reason);
+  return cancelOrders(openOrders.filter(order => orderSide(order) === "BUY"), reason);
 }
 
 function positionFor(positions, marketId, tokenId, outcomeId) {
@@ -529,8 +545,8 @@ function positionFor(positions, marketId, tokenId, outcomeId) {
       : Boolean(outcomeId && position?.outcome?.id) && String(position?.outcome?.id) === String(outcomeId)));
 }
 
-function isCurrentMarket(marketId) {
-  return Boolean(lastMarket?.id) && String(marketId) === String(lastMarket.id);
+function isConfiguredMarket(marketId) {
+  return marketId !== undefined && marketId !== null && lastMarkets.has(String(marketId));
 }
 
 function buyStopReason(positionShares, buyingAllowed) {
@@ -549,6 +565,17 @@ function pendingPositionSell(marketId, tokenId) {
   return pending || null;
 }
 
+function clearMarketState(marketId) {
+  const prefix = `${marketId}:`;
+  for (const key of buyStates.keys()) {
+    if (key.startsWith(prefix)) buyStates.delete(key);
+  }
+  for (const key of pendingPositionSells.keys()) {
+    if (key.startsWith(prefix)) pendingPositionSells.delete(key);
+  }
+  lastMatchStats.delete(String(marketId));
+}
+
 function calculateSellPrice(market, quote, cost) {
   const step = Number(tick(market)) / 1e18;
   const target = quote.bid && quote.bid.price >= cost
@@ -559,7 +586,7 @@ function calculateSellPrice(market, quote, cost) {
 }
 
 async function managePosition(position, market, book, openOrders) {
-  if (!isCurrentMarket(positionMarketId(position)) || !isCurrentMarket(market?.id)) return;
+  if (!isConfiguredMarket(positionMarketId(position)) || !isConfiguredMarket(market?.id)) return;
   const sharesWei = positionQuantity(position);
   if (sharesWei <= 0n) return;
   const tokenId = positionTokenId(position);
@@ -626,11 +653,16 @@ async function managePosition(position, market, book, openOrders) {
   const existing = sellOrders[0];
   const oldPrice = orderPrice(existing);
   const oldQuantity = orderQuantity(existing);
-  if (existing && oldPrice && Math.abs(oldPrice - priceNumber(targetWei)) <= Number(tick(market)) / 1e18 && (!oldQuantity || oldQuantity + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei)) return;
+  if (sellOrders.length === 1 && existing && oldPrice
+    && Math.abs(oldPrice - priceNumber(targetWei)) <= Number(tick(market)) / 1e18
+    && (!oldQuantity || oldQuantity + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei)) return;
   const pending = pendingPositionSell(market.id, tokenId);
   if (pending && Math.abs(pending.price - priceNumber(targetWei)) <= Number(tick(market)) / 1e18
-    && pending.quantityWei + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei) return;
-  if (existing) await cancelOrders([existing], "持仓卖价或数量变化");
+    && pending.quantityWei + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei && sellOrders.length <= 1) return;
+  if (sellOrders.length) {
+    const cancelled = await cancelOrders(sellOrders, "持仓卖价或数量变化");
+    if (LIVE_TRADING && cancelled < sellOrders.length) return;
+  }
   const shares = Number(sharesWei) / 1e18;
   if (shares < 1) return;
   const result = await createLimitOrder(market, Side.SELL, tokenId, target, shares, marketEndAt(market));
@@ -639,7 +671,7 @@ async function managePosition(position, market, book, openOrders) {
 }
 
 async function manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget) {
-  if (!isCurrentMarket(market?.id)) return;
+  if (!isConfiguredMarket(market?.id)) return;
   const tokenId = outcome.onChainId;
   const position = positionFor(positions, market.id, tokenId, outcome.id);
   const positionShares = position ? Number(positionQuantity(position)) / 1e18 : 0;
@@ -672,12 +704,13 @@ async function manageBuy(market, outcome, book, positions, openOrders, buyingAll
     "floor",
   ));
   const existing = matchingBuys[0];
-  if (existing && orderPrice(existing) && samePriceTick(orderPrice(existing), target, market)
+  if (matchingBuys.length === 1 && existing && orderPrice(existing) && samePriceTick(orderPrice(existing), target, market)
     && (!orderQuantity(existing) || orderQuantity(existing) >= BigInt(Math.floor(ORDER_SHARES * 1e18)))) return;
 
   const targetWei = priceWei(target, market, "floor");
+  const availableWei = balanceBudget.limitWei;
   const affordableSharesWei = targetWei > 0n
-    ? (balanceBudget.remainingWei * 10n ** 18n) / targetWei
+    ? (availableWei * 10n ** 18n) / targetWei
     : 0n;
   const affordableShares = Number(affordableSharesWei) / 1e18;
   const shares = Math.floor(Math.min(ORDER_SHARES, affordableShares) * 1e6) / 1e6;
@@ -685,48 +718,69 @@ async function manageBuy(market, outcome, book, positions, openOrders, buyingAll
     log("⏭️ 余额不足，跳过买单", `outcome=${outcome.name}`, `balanceShares=${affordableShares.toFixed(4)}`, `minShares=${MIN_ORDER_SHARES}`, `price=${target}`);
     return;
   }
-  const orderCostWei = buyCostWei(target, shares);
-  if (orderCostWei > balanceBudget.remainingWei) return;
-  balanceBudget.remainingWei -= orderCostWei;
-  if (matchingBuys.length) await cancelOrders(matchingBuys, "买一变化，刷新买单");
+  const newOrderCostWei = buyCostWei(target, shares);
+  if (newOrderCostWei > availableWei) return;
+  if (matchingBuys.length) {
+    const cancelled = await cancelOrders(matchingBuys, "买一变化，刷新买单");
+    if (LIVE_TRADING && cancelled < matchingBuys.length) return;
+  }
   const result = await createLimitOrder(market, Side.BUY, tokenId, target, shares, marketEndAt(market));
   const createdOrderId = orderId(result);
   log("📥 挂上证买单", `outcome=${outcome.name}`, `shares=${shares.toFixed(4)}`, `bid=${quote.bid.price}`, `ask=${quote.ask.price}`, `mid=${quote.mid?.toFixed(4)}`, `spread=${quote.spread.toFixed(4)}`, `live=${LIVE_TRADING}`, `id=${createdOrderId || "paper"}`);
 }
 
 async function monitorOpenBuyOrders() {
-  if (monitorRunning || cycleRunning || !lastMarket?.id) return;
+  if (monitorRunning || cycleRunning || !lastMarkets.size) return;
   monitorRunning = true;
   try {
-    const [book, openOrders] = await Promise.all([getBook(lastMarket.id), getOpenOrders()]);
-    const marketBuys = openOrders.filter(order => isCurrentMarket(orderMarketId(order)) && orderSide(order) === "BUY");
-    for (const order of marketBuys) {
-      const tokenId = orderTokenId(order);
-      const outcome = tokenId
-        ? lastMarket.outcomes?.find(item => String(item.onChainId) === String(tokenId))
-        : lastMarket.outcomes?.find(item => String(item.id) === String(orderOutcomeId(order)));
-      if (!outcome) continue;
-      const quote = quoteFromBook(book, lastMarket, outcome);
-      const ownPrice = orderPrice(order);
-      const ownQuantity = Number(orderQuantity(order)) / 1e18;
-      const state = buyStates.get(buyStateKey(lastMarket, outcome));
-      const reasons = [];
-      const bidTicks = quote.bid ? priceTicks(quote.bid.price, lastMarket) : null;
-      const ownTicks = ownPrice ? priceTicks(ownPrice, lastMarket) : null;
-      const confirmedTicks = state?.confirmedPrice === null || state?.confirmedPrice === undefined
-        ? null
-        : priceTicks(state.confirmedPrice, lastMarket);
+    const [openOrders, books] = await Promise.all([
+      getOpenOrders(),
+      Promise.all([...lastMarkets.values()].map(async market => {
+        try {
+          return [market, await getBook(market.id)];
+        } catch (error) {
+          log("⚠️ 市场盘口获取失败", `market=${market.id}`, error.message);
+          return [market, null];
+        }
+      })),
+    ]);
+    for (const [market, book] of books) {
+      const marketBuys = openOrders.filter(order => String(orderMarketId(order)) === String(market.id) && orderSide(order) === "BUY");
+      if (!book || market.marketDataUnavailable) {
+        if (marketBuys.length) await cancelOrders(marketBuys, market.marketDataUnavailable
+          ? `市场数据不可用：${market.marketDataUnavailable}`
+          : "盘口获取失败，撤销买单");
+        continue;
+      }
+      for (const order of marketBuys) {
+        const tokenId = orderTokenId(order);
+        const outcome = tokenId
+          ? market.outcomes?.find(item => String(item.onChainId) === String(tokenId))
+          : market.outcomes?.find(item => String(item.id) === String(orderOutcomeId(order)));
+        if (!outcome) continue;
+        const quote = quoteFromBook(book, market, outcome);
+        const ownPrice = orderPrice(order);
+        const ownQuantity = Number(orderQuantity(order)) / 1e18;
+        const state = buyStates.get(buyStateKey(market, outcome));
+        const reasons = [];
+        const bidTicks = quote.bid ? priceTicks(quote.bid.price, market) : null;
+        const ownTicks = ownPrice ? priceTicks(ownPrice, market) : null;
+        const confirmedTicks = state?.confirmedPrice === null || state?.confirmedPrice === undefined
+          ? null
+          : priceTicks(state.confirmedPrice, market);
 
-      if (!inConfiguredWindow()) reasons.push("不在配置挂买时段");
-      if (!quote.bid || !ownPrice || bidTicks !== ownTicks) reasons.push("买一已变化");
-      if (!quote.bid || quote.bid.size < BUY_MIN_BID_SHARES) reasons.push("买一数量不足");
-      if (!quote.bid || Math.abs(quote.bid.size - ownQuantity) <= ORDER_MONITOR_GAP_SHARES) reasons.push("买一疑似只剩本单");
-      if (confirmedTicks === null || bidTicks === null || bidTicks > confirmedTicks + BigInt(BUY_MAX_REPRICE_TICKS)) reasons.push("买一超过确认价格追价上限");
-      if (!quote.bid || quote.depthLevels < BUY_MIN_DEPTH_LEVELS) reasons.push("买一后深度不足");
-      if (state && state.lastPrice !== null && bidTicks > priceTicks(state.lastPrice, lastMarket) && quote.depth <= state.lastDepth) reasons.push("买一涨价但深度未增加");
+        if (!inConfiguredWindow()) reasons.push("不在配置挂买时段");
+        if (!quote.bid || !ownPrice || bidTicks !== ownTicks) reasons.push("买一已变化");
+        if (ownQuantity < MIN_ORDER_SHARES) reasons.push(`剩余数量低于${MIN_ORDER_SHARES}shares`);
+        if (!quote.bid || quote.bid.size < BUY_MIN_BID_SHARES) reasons.push("买一数量不足");
+        if (!quote.bid || Math.abs(quote.bid.size - ownQuantity) <= ORDER_MONITOR_GAP_SHARES) reasons.push("买一疑似只剩本单");
+        if (confirmedTicks === null || bidTicks === null || bidTicks > confirmedTicks + BigInt(BUY_MAX_REPRICE_TICKS)) reasons.push("买一超过确认价格追价上限");
+        if (!quote.bid || quote.depthLevels < BUY_MIN_DEPTH_LEVELS) reasons.push("买一后深度不足");
+        if (state && state.lastPrice !== null && bidTicks > priceTicks(state.lastPrice, market) && quote.depth <= state.lastDepth) reasons.push("买一涨价但深度未增加");
 
-      log("🔍 买单监控", `outcome=${outcome.name}`, `tokenId=${tokenId}`, `order=${orderId(order)}`, `ownPrice=${ownPrice ?? "null"}`, `bid=${quote.bid?.price ?? "null"}`, `bidSize=${quote.bid?.size ?? "null"}`, `ownSize=${ownQuantity}`, `depthLevels=${quote.depthLevels}`, `confirmed=${state?.confirmedPrice ?? "null"}`, `reasons=${reasons.join("|") || "ok"}`);
-      if (reasons.length) await cancelOrders([order], `每秒挂单监控：${reasons.join("、")}`);
+        log("🔍 买单监控", `market=${market.id}`, `outcome=${outcome.name}`, `tokenId=${tokenId}`, `order=${orderId(order)}`, `ownPrice=${ownPrice ?? "null"}`, `bid=${quote.bid?.price ?? "null"}`, `bidSize=${quote.bid?.size ?? "null"}`, `ownSize=${ownQuantity}`, `depthLevels=${quote.depthLevels}`, `confirmed=${state?.confirmedPrice ?? "null"}`, `reasons=${reasons.join("|") || "ok"}`);
+        if (reasons.length) await cancelOrders([order], `每秒挂单监控：${reasons.join("、")}`);
+      }
     }
   } catch (error) {
     log("⚠️ 挂单监控失败", error.message);
@@ -736,27 +790,40 @@ async function monitorOpenBuyOrders() {
 }
 
 async function monitorPositions() {
-  if (positionMonitorRunning || cycleRunning || !lastMarket?.id) return;
+  if (positionMonitorRunning || cycleRunning || !lastMarkets.size) return;
   positionMonitorRunning = true;
   try {
-    const [book, positions, openOrders] = await Promise.all([
-      getBook(lastMarket.id),
+    const [positions, openOrders, books] = await Promise.all([
       getPositions(),
       getOpenOrders(),
+      Promise.all([...lastMarkets.values()].map(async market => {
+        try {
+          return [market, await getBook(market.id)];
+        } catch (error) {
+          log("⚠️ 市场盘口获取失败", `market=${market.id}`, error.message);
+          return [market, null];
+        }
+      })),
     ]);
-    const marketPositions = positions.filter(position => isCurrentMarket(positionMarketId(position)));
-    for (const position of marketPositions) {
-      const tokenId = positionTokenId(position);
-      const outcome = lastMarket.outcomes?.find(item => String(item.onChainId) === String(tokenId)) || position.outcome;
-      if (!outcome) continue;
-      const positionShares = Number(positionQuantity(position)) / 1e18;
-      const stopReason = buyStopReason(positionShares, { ok: true, reason: "" });
-      if (stopReason) {
-        const buys = openOrders.filter(order => isCurrentMarket(orderMarketId(order))
-          && matchingOrder(order, lastMarket.id, tokenId, outcome.id) && orderSide(order) === "BUY");
-        if (buys.length) await cancelOrders(buys, `持仓监控：${stopReason}`);
+    for (const [market, book] of books) {
+      const marketPositions = positions.filter(position => String(positionMarketId(position)) === String(market.id));
+      if (!book) {
+        const marketBuys = openOrders.filter(order => String(orderMarketId(order)) === String(market.id) && orderSide(order) === "BUY");
+        if (marketBuys.length) await cancelOrders(marketBuys, "盘口获取失败，撤销买单");
+        continue;
       }
-      await managePosition(position, lastMarket, book, openOrders);
+      for (const position of marketPositions) {
+        const tokenId = positionTokenId(position);
+        const outcome = market.outcomes?.find(item => String(item.onChainId) === String(tokenId)) || position.outcome;
+        if (!outcome) continue;
+        const positionShares = Number(positionQuantity(position)) / 1e18;
+        const stopReason = buyStopReason(positionShares, { ok: true, reason: "" });
+        if (stopReason) {
+          const buys = openOrders.filter(order => matchingOrder(order, market.id, tokenId, outcome.id) && orderSide(order) === "BUY");
+          if (buys.length) await cancelOrders(buys, `持仓监控：${stopReason}`);
+        }
+        await managePosition(position, market, book, openOrders);
+      }
     }
   } catch (error) {
     log("⚠️ 持仓卖单监控失败", error.message);
@@ -766,35 +833,99 @@ async function monitorPositions() {
 }
 
 async function cycle() {
-  if (cycleRunning || positionMonitorRunning) return;
+  if (cycleRunning || monitorRunning || positionMonitorRunning) return;
   cycleRunning = true;
   try {
-  const market = await getMarket();
-  lastMarket = market;
-  if (!market?.id || !Array.isArray(market.outcomes) || market.outcomes.length < 2) throw new Error("市场或两个 outcome 不完整");
-  validateUpDownMarket(market);
-  const [book, positions, openOrders, stats, balanceWei] = await Promise.all([getBook(market.id), getPositions(), getOpenOrders(), recentMatchStats(market), LIVE_TRADING ? getBalance() : Promise.resolve(10n ** 30n)]);
-  const balanceBudget = { remainingWei: balanceWei };
-  const buyingAllowed = canPlaceBuys(market, stats);
-  log("📊 风控", `window=${inConfiguredWindow()}`, `buy=${buyingAllowed.ok}`, `reason=${buyingAllowed.reason || "ok"}`, `trades5m=${stats.trades}`, `shares5m=${stats.shares.toFixed(1)}`, `maxTrade=${stats.maxShares.toFixed(1)}`);
-   for (const position of positions.filter(item => isCurrentMarket(positionMarketId(item)))) {
-    await managePosition(position, market, book, openOrders);
-  }
-  if (!buyingAllowed.ok) {
-     await cancelOrders(openOrders.filter(order => isCurrentMarket(orderMarketId(order)) && orderSide(order) === "BUY"), buyingAllowed.reason);
-    return;
-  }
-  for (const outcome of market.outcomes.slice(0, 2)) {
-     await manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget);
-    await sleep(100);
-  }
+    const markets = await getMarkets();
+    const nextMarkets = new Map();
+    for (const result of markets) {
+      let market = result.market;
+      let unavailableReason = result.unavailableReason;
+      if (market && (!market.id || !Array.isArray(market.outcomes) || market.outcomes.length < 2)) {
+        log("⚠️ 市场数据不完整", `market=${market?.id || "unknown"}`, `category=${result.categorySlug}`);
+        market = null;
+        unavailableReason = "市场或两个 outcome 不完整";
+      }
+      if (market) {
+        try {
+          validateUpDownMarket(market);
+        } catch (error) {
+          log("⚠️ 非 Up/Down 市场", `market=${market.id}`, error.message);
+          market = null;
+          unavailableReason = error.message;
+        }
+      }
+      if (!market) {
+        const previousMarkets = [...lastMarkets.values()].filter(item => item.categorySlug === result.categorySlug);
+        for (const previousMarket of previousMarkets) {
+          nextMarkets.set(String(previousMarket.id), { ...previousMarket, marketDataUnavailable: unavailableReason });
+        }
+        continue;
+      }
+      nextMarkets.set(String(market.id), market);
+      for (const previousMarket of lastMarkets.values()) {
+        if (previousMarket.categorySlug === result.categorySlug && String(previousMarket.id) !== String(market.id)) {
+          nextMarkets.set(String(previousMarket.id), { ...previousMarket, marketDataUnavailable: "市场已切换，等待旧订单清理" });
+        }
+      }
+    }
+    lastMarkets.clear();
+    for (const [marketId, market] of nextMarkets) lastMarkets.set(marketId, market);
+    if (!lastMarkets.size) throw new Error("没有可做市的 Up/Down 市场");
+
+    const [positions, openOrders, balanceWei, marketData] = await Promise.all([
+      getPositions(),
+      getOpenOrders(),
+      LIVE_TRADING ? getBalance() : Promise.resolve(10n ** 30n),
+      Promise.all([...lastMarkets.values()].map(async market => {
+        try {
+          const [book, stats] = await Promise.all([getBook(market.id), recentMatchStats(market)]);
+          return { market, book, stats };
+        } catch (error) {
+          log("⚠️ 市场数据获取失败", `market=${market.id}`, error.message);
+          return { market, book: null, stats: null };
+        }
+      })),
+    ]);
+    for (const { market, book, stats } of marketData) {
+      if (!book || !stats) {
+        const marketBuys = openOrders.filter(order => String(orderMarketId(order)) === String(market.id) && orderSide(order) === "BUY");
+        if (marketBuys.length) await cancelOrders(marketBuys, "市场数据获取失败，撤销买单");
+        continue;
+      }
+      const buyingAllowed = market.marketDataUnavailable
+        ? { ok: false, reason: market.marketDataUnavailable }
+        : canPlaceBuys(market, stats);
+      log("📊 风控", `market=${market.id}`, `category=${market.categorySlug}`, `window=${inConfiguredWindow()}`, `buy=${buyingAllowed.ok}`, `reason=${buyingAllowed.reason || "ok"}`, `trades5m=${stats.trades}`, `shares5m=${stats.shares.toFixed(1)}`, `maxTrade=${stats.maxShares.toFixed(1)}`);
+      for (const position of positions.filter(item => String(positionMarketId(item)) === String(market.id))) {
+        await managePosition(position, market, book, openOrders);
+      }
+      if (!buyingAllowed.ok) {
+        await cancelOrders(openOrders.filter(order => String(orderMarketId(order)) === String(market.id) && orderSide(order) === "BUY"), buyingAllowed.reason);
+        continue;
+      }
+      for (const outcome of market.outcomes.slice(0, 2)) {
+        // Each market/outcome has an independent cap equal to the account balance.
+        const balanceBudget = { limitWei: balanceWei };
+        await manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget);
+        await sleep(100);
+      }
+    }
+    for (const [marketId, market] of lastMarkets) {
+      if (market.marketDataUnavailable
+        && !openOrders.some(order => String(orderMarketId(order)) === String(marketId))
+        && !positions.some(position => String(positionMarketId(position)) === String(marketId))) {
+        lastMarkets.delete(marketId);
+        clearMarketState(marketId);
+      }
+    }
   } finally {
     cycleRunning = false;
   }
 }
 
 async function main() {
-  log("🤖 上证指数涨跌直连做市脚本启动", `live=${LIVE_TRADING}`, `category=${CATEGORY_SLUG}`);
+  log("🤖 上证指数涨跌直连做市脚本启动", `live=${LIVE_TRADING}`, `categories=${CATEGORY_SLUG.join(",")}`);
   if (!LIVE_TRADING) log("📝 当前为纸面模式，不会提交真实订单；设置 SSE_LIVE_TRADING=true 才会下单");
   setInterval(() => {
     monitorOpenBuyOrders().catch(error => log("⚠️ 挂单监控异常", error.message));
