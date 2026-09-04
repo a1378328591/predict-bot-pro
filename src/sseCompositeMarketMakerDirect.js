@@ -33,6 +33,8 @@ const LOOP_INTERVAL_MS = 30_000;
 const MATCH_REFRESH_MS = 30_000;
 // BUY 允许的最大买卖价差；0.06 表示 6 个百分点。
 const MAX_SPREAD = 0.06;
+// BUY 最低价格；低于 0.30 的价格不挂，避免单边行情下风险过高。
+const MIN_BUY_PRICE = 0.30;
 // 近 5 分钟最多允许的成交笔数，达到该值停止挂 BUY。
 const MAX_RECENT_TRADES = 4;
 // 近 5 分钟最多允许的成交总 shares。
@@ -682,8 +684,10 @@ async function manageBuy(market, outcome, book, positions, openOrders, buyingAll
     return;
   }
   const quote = quoteFromBook(book, market, outcome);
-  if (!quote.bid || !quote.ask || quote.spread > MAX_SPREAD || quote.bid.price <= 0 || quote.bid.price >= 1) {
-     if (matchingBuys.length) await cancelOrders(matchingBuys, "盘口缺失或价差超过6个百分点");
+  if (!quote.bid || !quote.ask || quote.spread > MAX_SPREAD || quote.bid.price < MIN_BUY_PRICE || quote.bid.price >= 1) {
+     if (matchingBuys.length) await cancelOrders(matchingBuys, !quote.bid || quote.bid.price < MIN_BUY_PRICE
+       ? `买一价格低于${MIN_BUY_PRICE}或盘口缺失`
+       : "盘口缺失或价差超过6个百分点");
     return;
   }
   if (quote.bid.size < BUY_MIN_BID_SHARES || quote.depthLevels < BUY_MIN_DEPTH_LEVELS) {
@@ -772,6 +776,7 @@ async function monitorOpenBuyOrders() {
         if (!inConfiguredWindow()) reasons.push("不在配置挂买时段");
         if (!quote.bid || !ownPrice || bidTicks !== ownTicks) reasons.push("买一已变化");
         if (ownQuantity < MIN_ORDER_SHARES) reasons.push(`剩余数量低于${MIN_ORDER_SHARES}shares`);
+        if (ownPrice < MIN_BUY_PRICE) reasons.push(`挂单价格低于${MIN_BUY_PRICE}`);
         if (!quote.bid || quote.bid.size < BUY_MIN_BID_SHARES) reasons.push("买一数量不足");
         if (!quote.bid || Math.abs(quote.bid.size - ownQuantity) <= ORDER_MONITOR_GAP_SHARES) reasons.push("买一疑似只剩本单");
         if (confirmedTicks === null || bidTicks === null || bidTicks > confirmedTicks + BigInt(BUY_MAX_REPRICE_TICKS)) reasons.push("买一超过确认价格追价上限");
