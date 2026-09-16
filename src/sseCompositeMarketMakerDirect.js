@@ -21,10 +21,17 @@ const RPC_URLS = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolea
 const LIVE_TRADING = true;
 // 只按这些 category slug 选择市场；每个 category 取一个 OPEN 市场。
 const CATEGORY_SLUG = [
-  "sse-composite-index-up-or-down-on-september-3-2026",
+  "cxmt-up-or-down-on-september-16-2026",
+  "unitree-up-or-down-on-september-16-2026",
+  "shein-up-or-down-on-september-16-2026",
+  "hang-seng-index-up-or-down-on-september-16-2026",
+  "kospi-composite-index-up-or-down-on-september-16-2026",
+  "sse-composite-index-up-or-down-on-september-16-2026",
+  "sk-hynix-inc-up-or-down-on-september-16-2026",
 ];
 // 北京时间允许挂 BUY 的时段，24 小时制；当前为凌晨1点到早上7点。
-const QUOTE_WINDOWS = parseWindows("00:00-08:00");
+const QUOTE_WINDOWS_TEXT = "18:05-07:55";
+const QUOTE_WINDOWS = parseWindows(QUOTE_WINDOWS_TEXT);
 // 距离市场结束少于该分钟数后停止新挂 BUY，但继续维护 SELL。
 const STOP_BUY_BEFORE_CLOSE_MINUTES = 90;
 // 主做市循环间隔；买单确认周期按该循环计数。
@@ -34,7 +41,7 @@ const MATCH_REFRESH_MS = 30_000;
 // BUY 允许的最大买卖价差；0.06 表示 6 个百分点。
 const MAX_SPREAD = 0.06;
 // BUY 最低价格；低于 0.30 的价格不挂，避免单边行情下风险过高。
-const MIN_BUY_PRICE = 0.30;
+const MIN_BUY_PRICE = 0.35;
 // 近 5 分钟最多允许的成交笔数，达到该值停止挂 BUY。
 const MAX_RECENT_TRADES = 4;
 // 近 5 分钟最多允许的成交总 shares。
@@ -42,7 +49,7 @@ const MAX_RECENT_VOLUME = 500;
 // 近 5 分钟允许的单笔最大成交 shares。
 const MAX_SINGLE_TRADE = 200;
 // 每个方向单次挂 BUY 的 shares 数量。
-const ORDER_SHARES = 110;
+const ORDER_SHARES = 120;
 // BUY 最低提交数量；余额折算后低于该数量不挂 BUY。
 const MIN_ORDER_SHARES = 100;
 // 任一方向持仓超过该数量后停止该方向 BUY；降回该值或以下后恢复。
@@ -56,13 +63,13 @@ const BUY_CONFIRM_CYCLES = 3;
 // 买一最少 shares；低于该数量不挂 BUY。
 const BUY_MIN_BID_SHARES = 100;
 // 买方盘口至少需要的价格档位数，包含买一；默认买一及后两档。
-const BUY_MIN_DEPTH_LEVELS = 3;
+const BUY_MIN_DEPTH_LEVELS = 2;
 // 单轮允许相对已确认价格上调的最大 tick 数。
-const BUY_MAX_REPRICE_TICKS = 2;
+const BUY_MAX_REPRICE_TICKS = 5;
 // BUY 挂单监控频率，默认每秒检查一次。
-const ORDER_MONITOR_INTERVAL_MS = 3_000;
+const ORDER_MONITOR_INTERVAL_MS = 1_000;
 // 买一总量与自身挂单量相差不超过该 shares 时，认为可能只剩自己并撤单。
-const ORDER_MONITOR_GAP_SHARES = 50;
+const ORDER_MONITOR_GAP_SHARES = 40;
 // 持仓及 SELL 监控频率，默认每秒检查一次。
 const POSITION_MONITOR_INTERVAL_MS = 6_000;
 // 允许忽略的持仓/卖单链上数量尾差。
@@ -385,10 +392,10 @@ async function getMarkets() {
     try {
       const category = await api(`/v1/categories/${encodeURIComponent(categorySlug)}`, { headers: apiHeaders() });
       const markets = Array.isArray(category?.markets) ? category.markets : [];
-      const market = markets.find(item => String(item.tradingStatus || item.status).toUpperCase() === "OPEN") || markets[0];
+      const market = markets.find(item => String(item.tradingStatus || item.status).toUpperCase() === "OPEN");
       if (!market) {
-        log("⚠️ 类别没有市场", `category=${categorySlug}`);
-        return { categorySlug, market: null, unavailableReason: "类别没有市场" };
+        log("⚠️ 类别没有 OPEN 市场", `category=${categorySlug}`, `marketCount=${markets.length}`);
+        return { categorySlug, market: null, unavailableReason: "类别没有 OPEN 市场" };
       }
       return { market: { ...market, category: { endsAt: category.endsAt }, categorySlug }, categorySlug, unavailableReason: null };
     } catch (error) {
@@ -487,12 +494,14 @@ async function cancelOrders(orders, reason) {
   }
 }
 
-async function createLimitOrder(market, side, tokenId, price, shares, expiresAt) {
+async function createLimitOrder(market, side, tokenId, price, sharesOrWei, expiresAt) {
   if (!LIVE_TRADING) return { id: `paper-${Date.now()}` };
   if (!PRIVATE_KEY || !ACCOUNT || !API_KEY) throw new Error("实盘需要 PREDICT_API_KEY / PRIVY_PRIVATE_KEY / PREDICT_ACCOUNT");
   orderBuilder ||= await OrderBuilder.make(ChainId.BnbMainnet, new Wallet(PRIVATE_KEY), { predictAccount: ACCOUNT });
   const pWei = priceWei(price, market, side === Side.SELL ? "ceil" : "floor");
-  const qWei = BigInt(Math.floor(shares * 1e6)) * 10n ** 12n;
+  const qWei = typeof sharesOrWei === "bigint"
+    ? sharesOrWei
+    : BigInt(Math.floor(sharesOrWei * 1e6)) * 10n ** 12n;
   const amounts = orderBuilder.getLimitOrderAmounts({ side, pricePerShareWei: pWei, quantityWei: qWei });
   const order = orderBuilder.buildOrder("LIMIT", {
     side,
@@ -636,7 +645,7 @@ async function managePosition(position, market, book, openOrders) {
     if (remaining < 1n * 10n ** 18n) return;
     const pending = pendingPositionSell(market.id, tokenId);
     if (pending && pending.quantityWei >= remaining) return;
-    const result = await createLimitOrder(market, Side.SELL, tokenId, target, Number(remaining) / 1e18, marketEndAt(market));
+    const result = await createLimitOrder(market, Side.SELL, tokenId, target, remaining, marketEndAt(market));
     pendingPositionSells.set(`${market.id}:${tokenId}`, { price: targetPrice, quantityWei: remaining, createdAt: Date.now() });
     log("📤 补挂最优卖单", `outcome=${outcome.name}`, `shares=${(Number(remaining) / 1e18).toFixed(4)}`, `keptOrders=${targetSellOrders.length}`, `price=${target}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
     return;
@@ -665,11 +674,10 @@ async function managePosition(position, market, book, openOrders) {
     const cancelled = await cancelOrders(sellOrders, "持仓卖价或数量变化");
     if (LIVE_TRADING && cancelled < sellOrders.length) return;
   }
-  const shares = Number(sharesWei) / 1e18;
-  if (shares < 1) return;
-  const result = await createLimitOrder(market, Side.SELL, tokenId, target, shares, marketEndAt(market));
+  if (sharesWei < 1n * 10n ** 18n) return;
+  const result = await createLimitOrder(market, Side.SELL, tokenId, target, sharesWei, marketEndAt(market));
   pendingPositionSells.set(`${market.id}:${tokenId}`, { price: priceNumber(targetWei), quantityWei: sharesWei, createdAt: Date.now() });
-  log("📤 挂持仓卖单", `outcome=${outcome.name}`, `shares=${shares.toFixed(4)}`, `cost=${cost.toFixed(4)}`, `bid=${quote.bid?.price ?? "-"}`, `ask=${quote.ask.price}`, `price=${target}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
+  log("📤 挂持仓卖单", `outcome=${outcome.name}`, `shares=${(Number(sharesWei) / 1e18).toFixed(4)}`, `cost=${cost.toFixed(4)}`, `bid=${quote.bid?.price ?? "-"}`, `ask=${quote.ask.price}`, `price=${target}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
 }
 
 async function manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget) {
@@ -876,6 +884,9 @@ async function cycle() {
     }
     lastMarkets.clear();
     for (const [marketId, market] of nextMarkets) lastMarkets.set(marketId, market);
+    const loadedCategories = new Set([...lastMarkets.values()].map(market => market.categorySlug));
+    const unavailable = markets.filter(result => !result.market).map(result => `${result.categorySlug}=${result.unavailableReason}`);
+    log("📚 市场加载", `configured=${CATEGORY_SLUG.length}`, `loaded=${loadedCategories.size}`, `marketIds=${lastMarkets.size}`, `unavailable=${unavailable.join(";") || "none"}`);
     if (!lastMarkets.size) throw new Error("没有可做市的 Up/Down 市场");
 
     const [positions, openOrders, balanceWei, marketData] = await Promise.all([
@@ -930,7 +941,7 @@ async function cycle() {
 }
 
 async function main() {
-  log("🤖 上证指数涨跌直连做市脚本启动", `live=${LIVE_TRADING}`, `categories=${CATEGORY_SLUG.join(",")}`);
+  log("🤖 上证指数涨跌做市脚本启动", `live=${LIVE_TRADING}`, `categories=${CATEGORY_SLUG.join(",")}`, `windows=${QUOTE_WINDOWS_TEXT}`);
   if (!LIVE_TRADING) log("📝 当前为纸面模式，不会提交真实订单；设置 SSE_LIVE_TRADING=true 才会下单");
   setInterval(() => {
     monitorOpenBuyOrders().catch(error => log("⚠️ 挂单监控异常", error.message));

@@ -10,7 +10,7 @@ import { getJwtTokenWithSDK } from "./getJwtTokenWithSDK.js";
 // any sports or generic market-maker implementation.
 // ======== 运行凭证（只从运行环境读取，不要写入代码） ========
 // Predict API Key，仅从运行环境读取，不写入代码。
-const { PREDICT_API_KEY: API_KEY, PRIVY_PRIVATE_KEY: PRIVATE_KEY, PREDICT_ACCOUNT: ACCOUNT, RPC_URL } = process.env;
+const { PREDICT_API_KEY: API_KEY, PRIVY_PRIVATE_KEY: PRIVATE_KEY, PREDICT_ACCOUNT: ACCOUNT, RPC_URL, FICLASH_PROXY_URL, SSE_QUOTE_WINDOWS } = process.env;
 // ======== 固定运行配置（修改这里，不要再放到 .env） ========
 // Predict API 基础地址。
 const API_BASE_URL = "https://api.predict.fun";
@@ -22,8 +22,9 @@ const RPC_URLS = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolea
 const LIVE_TRADING = true;
 // 只按这个 category slug 选择市场。
 const CATEGORY_SLUG = "sse-composite-index-up-or-down-on-september-3-2026";
-// 北京时间允许挂 BUY 的时段，24 小时制；当前为凌晨1点到早上7点。
-const QUOTE_WINDOWS = parseWindows("00:00-08:00");
+// 北京时间允许挂 BUY 的时段，24 小时制；默认避开凌晨 00:00-08:00 的单边波动。
+const QUOTE_WINDOWS_TEXT = SSE_QUOTE_WINDOWS || "08:00-24:00";
+const QUOTE_WINDOWS = parseWindows(QUOTE_WINDOWS_TEXT);
 // 距离市场结束少于该分钟数后停止新挂 BUY，但继续维护 SELL。
 const STOP_BUY_BEFORE_CLOSE_MINUTES = 90;
 // 主做市循环间隔；买单确认周期按该循环计数。
@@ -66,8 +67,8 @@ const POSITION_MONITOR_INTERVAL_MS = 6_000;
 const SELL_QUANTITY_TOLERANCE_WEI = 1n * 10n ** 18n;
 // 是否启用近 5 分钟成交风控。
 const USE_MATCH_RISK = true;
-// 直连失败后的 FiClash HTTP 代理地址。
-const PROXY_URL = "http://127.0.0.1:7890";
+// 所有 HTTP 请求默认经过 FiClash；可通过 FICLASH_PROXY_URL 覆盖。
+const PROXY_URL = FICLASH_PROXY_URL || "http://127.0.0.1:7890";
 // 日志文件路径。
 const LOG_FILE = "sseCompositeMarketMaker.log";
 
@@ -801,7 +802,7 @@ async function cycle() {
 }
 
 async function main() {
-  log("🤖 上证指数涨跌独立做市脚本启动", `live=${LIVE_TRADING}`, `category=${CATEGORY_SLUG}`, "windows=01:00-07:00", `proxyFallback=${PROXY_URL}`);
+  log("🤖 上证指数涨跌独立做市脚本启动", `live=${LIVE_TRADING}`, `category=${CATEGORY_SLUG}`, `windows=${QUOTE_WINDOWS_TEXT}`, `proxy=${PROXY_URL}`);
   if (!LIVE_TRADING) log("📝 当前为纸面模式，不会提交真实订单；设置 SSE_LIVE_TRADING=true 才会下单");
   setInterval(() => {
     monitorOpenBuyOrders().catch(error => log("⚠️ 挂单监控异常", error.message));
