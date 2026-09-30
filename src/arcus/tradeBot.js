@@ -805,8 +805,17 @@ async function main() {
   }
 }
 
-const isDirectRun = process.argv[1]
-  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+export function isMainEntrypoint(moduleUrl, argvPath, pmExecPath) {
+  return [argvPath, pmExecPath]
+    .filter(Boolean)
+    .some(candidate => pathToFileURL(resolve(candidate)).href === moduleUrl);
+}
+
+const isDirectRun = isMainEntrypoint(
+  import.meta.url,
+  process.argv[1],
+  process.env.pm_exec_path,
+);
 
 if (isDirectRun) {
   process.on("SIGINT", () => { stopping = true; });

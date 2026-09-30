@@ -1,14 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   calculateBuyNotional,
   decideAction,
   ema,
+  isMainEntrypoint,
   kdj,
   reconcilePositionSnapshot,
   rsi,
   timedExitDue,
 } from "../src/arcus/tradeBot.js";
+
+test("entrypoint detection supports direct Node and PM2 execution", () => {
+  const scriptPath = resolve("src/arcus/tradeBot.js");
+  const moduleUrl = pathToFileURL(scriptPath).href;
+  assert.equal(isMainEntrypoint(moduleUrl, scriptPath, undefined), true);
+  assert.equal(isMainEntrypoint(moduleUrl, resolve("pm2/ProcessContainerFork.js"), scriptPath), true);
+  assert.equal(isMainEntrypoint(moduleUrl, resolve("test/arcusIndicators.test.js"), undefined), false);
+});
 
 test("EMA uses an SMA seed and then the exponential formula", () => {
   assert.deepEqual(ema([1, 2, 3, 4, 5], 3), [null, null, 2, 3, 4]);
