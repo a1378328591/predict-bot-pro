@@ -4,6 +4,7 @@ import { appendFileSync } from "node:fs";
 import { Wallet } from "ethers";
 import { ChainId, OrderBuilder, Side } from "@predictdotfun/sdk";
 import { getJwtTokenWithSDK } from "./getJwtTokenWithSDK.js";
+import { compileQuoteSchedules, formatQuoteSchedules, quoteWindowStatus } from "./marketQuoteSchedule.js";
 
 // This file intentionally contains the complete SSE strategy. It does not import
 // any sports or generic market-maker implementation.
@@ -19,19 +20,42 @@ const GRAPHQL_URL = "https://graphql.predict.fun/graphql";
 const RPC_URLS = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolean);
 // 直接实盘：真实提交 BUY、SELL 和撤单。
 const LIVE_TRADING = true;
-// 只按这些 category slug 选择市场；每个 category 取一个 OPEN 市场。
-const CATEGORY_SLUG = [
-  "cxmt-up-or-down-on-september-16-2026",
-  "unitree-up-or-down-on-september-16-2026",
-  "shein-up-or-down-on-september-16-2026",
-  "hang-seng-index-up-or-down-on-september-16-2026",
-  "kospi-composite-index-up-or-down-on-september-16-2026",
-  "sse-composite-index-up-or-down-on-september-16-2026",
-  "sk-hynix-inc-up-or-down-on-september-16-2026",
+// 每组市场独立配置 category 和北京时间挂 BUY 区间；区间为 [start, end)，可配置多段。
+const MARKET_GROUPS = [
+  {
+    name: "上证",
+    categorySlugs: [
+      "cxmt-up-or-down-on-october-8-2026",
+      "unitree-up-or-down-on-october-8-2026",
+      "sse-composite-index-up-or-down-on-october-8-2026",
+    ],
+    quoteWindows: [
+      { start: "2026-09-30 18:05", end: "2026-10-08 07:55" },
+    ],
+  },
+  {
+    name: "港股",
+    categorySlugs: [
+      "shein-up-or-down-on-october-2-2026",
+      "hang-seng-index-up-or-down-on-october-2-2026",
+    ],
+    quoteWindows: [
+      { start: "2026-09-30 18:05", end: "2026-10-02 07:55" },
+    ],
+  },
+  {
+    name: "韩股",
+    categorySlugs: [
+      "kospi-composite-index-up-or-down-on-october-1-2026",
+      "sk-hynix-inc-up-or-down-on-october-1-2026",
+    ],
+    quoteWindows: [
+      { start: "2026-09-30 18:05", end: "2026-10-01 07:55" },
+    ],
+  },
 ];
-// 北京时间允许挂 BUY 的时段，24 小时制；当前为凌晨1点到早上7点。
-const QUOTE_WINDOWS_TEXT = "18:05-07:55";
-const QUOTE_WINDOWS = parseWindows(QUOTE_WINDOWS_TEXT);
+const CATEGORY_SLUGS = MARKET_GROUPS.flatMap(group => group.categorySlugs);
+const QUOTE_SCHEDULE_BY_CATEGORY = compileQuoteSchedules(MARKET_GROUPS);
 // 距离市场结束少于该分钟数后停止新挂 BUY，但继续维护 SELL。
 const STOP_BUY_BEFORE_CLOSE_MINUTES = 90;
 // 主做市循环间隔；买单确认周期按该循环计数。
@@ -41,7 +65,7 @@ const MATCH_REFRESH_MS = 30_000;
 // BUY 允许的最大买卖价差；0.06 表示 6 个百分点。
 const MAX_SPREAD = 0.06;
 // BUY 最低价格；低于 0.30 的价格不挂，避免单边行情下风险过高。
-const MIN_BUY_PRICE = 0.35;
+const MIN_BUY_PRICE = 0.40;
 // 近 5 分钟最多允许的成交笔数，达到该值停止挂 BUY。
 const MAX_RECENT_TRADES = 4;
 // 近 5 分钟最多允许的成交总 shares。
@@ -49,7 +73,7 @@ const MAX_RECENT_VOLUME = 500;
 // 近 5 分钟允许的单笔最大成交 shares。
 const MAX_SINGLE_TRADE = 200;
 // 每个方向单次挂 BUY 的 shares 数量。
-const ORDER_SHARES = 120;
+const ORDER_SHARES = 105;
 // BUY 最低提交数量；余额折算后低于该数量不挂 BUY。
 const MIN_ORDER_SHARES = 100;
 // 任一方向持仓超过该数量后停止该方向 BUY；降回该值或以下后恢复。
@@ -58,10 +82,12 @@ const POSITION_BUY_STOP_SHARES = 100;
 const MIN_REWARD_SELL_SHARES = 100;
 // 持仓卖价相对买一使用的 tick 数，默认买一上方 1 tick。
 const SELL_REFRESH_TICKS = 1;
+// 买一达到该价格且不低于持仓成本时，以买一价提交限价卖单直接成交。
+const DIRECT_SELL_MIN_PRICE = 0.75;
 // 买一必须连续稳定的主循环周期数，默认 3 个周期，约 90 秒。
 const BUY_CONFIRM_CYCLES = 3;
 // 买一最少 shares；低于该数量不挂 BUY。
-const BUY_MIN_BID_SHARES = 100;
+const BUY_MIN_BID_SHARES = 90;
 // 买方盘口至少需要的价格档位数，包含买一；默认买一及后两档。
 const BUY_MIN_DEPTH_LEVELS = 2;
 // 单轮允许相对已确认价格上调的最大 tick 数。
@@ -102,31 +128,6 @@ function log(...args) {
   } catch {}
 }
 
-function parseWindows(value) {
-  return String(value).split(",").map(item => {
-    const [start, end] = item.trim().split("-");
-    if (!/^\d{2}:\d{2}$/.test(start || "") || !/^\d{2}:\d{2}$/.test(end || "")) return null;
-    const toMinutes = text => Number(text.slice(0, 2)) * 60 + Number(text.slice(3));
-    const startMinutes = toMinutes(start);
-    const endMinutes = toMinutes(end);
-    // 允许 24:00 仅作为结束时间，表示当天最后一分钟之后的边界。
-    return startMinutes >= 0 && startMinutes < 1440 && endMinutes >= 0 && endMinutes <= 1440
-      ? { start: startMinutes, end: endMinutes }
-      : null;
-  }).filter(Boolean);
-}
-
-function shanghaiMinutes(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-  return Number(parts.find(part => part.type === "hour")?.value) * 60
-    + Number(parts.find(part => part.type === "minute")?.value);
-}
-
 function marketEndAt(market) {
   const values = [market?.endsAt, market?.endTime, market?.endDate, market?.closeTime, market?.settlementTime, market?.category?.endsAt];
   for (const value of values) {
@@ -139,11 +140,8 @@ function marketEndAt(market) {
   return null;
 }
 
-function inConfiguredWindow(date = new Date()) {
-  const current = shanghaiMinutes(date);
-  return QUOTE_WINDOWS.some(({ start, end }) => start <= end
-    ? current >= start && current < end
-    : current >= start || current < end);
+function configuredWindowStatus(market, date = new Date()) {
+  return quoteWindowStatus(QUOTE_SCHEDULE_BY_CATEGORY, market?.categorySlug, date);
 }
 
 function isBeforeSettlementCutoff(market, date = new Date()) {
@@ -152,7 +150,8 @@ function isBeforeSettlementCutoff(market, date = new Date()) {
 }
 
 function canPlaceBuys(market, stats) {
-  if (!inConfiguredWindow()) return { ok: false, reason: "不在配置挂买时段" };
+  const windowStatus = configuredWindowStatus(market);
+  if (!windowStatus.open) return { ok: false, reason: `不在${windowStatus.marketName}配置挂买时段` };
   if (isBeforeSettlementCutoff(market)) return { ok: false, reason: "距离结算进入停止挂买区间" };
   if (USE_MATCH_RISK && stats.error) return { ok: false, reason: "成交风控数据获取失败" };
   if (USE_MATCH_RISK && (stats.trades >= MAX_RECENT_TRADES || stats.shares >= MAX_RECENT_VOLUME || stats.maxShares >= MAX_SINGLE_TRADE)) {
@@ -388,7 +387,7 @@ async function api(path, options = {}) {
 }
 
 async function getMarkets() {
-  const results = await Promise.all(CATEGORY_SLUG.map(async categorySlug => {
+  const results = await Promise.all(CATEGORY_SLUGS.map(async categorySlug => {
     try {
       const category = await api(`/v1/categories/${encodeURIComponent(categorySlug)}`, { headers: apiHeaders() });
       const markets = Array.isArray(category?.markets) ? category.markets : [];
@@ -596,6 +595,12 @@ function calculateSellPrice(market, quote, cost) {
   return Math.min(0.99, target);
 }
 
+function shouldDirectSellAtBid(quote, cost) {
+  return Boolean(quote.bid
+    && quote.bid.price >= DIRECT_SELL_MIN_PRICE
+    && quote.bid.price >= cost);
+}
+
 async function managePosition(position, market, book, openOrders) {
   if (!isConfiguredMarket(positionMarketId(position)) || !isConfiguredMarket(market?.id)) return;
   const sharesWei = positionQuantity(position);
@@ -603,13 +608,36 @@ async function managePosition(position, market, book, openOrders) {
   const tokenId = positionTokenId(position);
   const outcome = market.outcomes?.find(item => String(item.onChainId) === String(tokenId)) || position.outcome;
   if (!outcome) return;
-  const quote = quoteFromBook(book, market, outcome);
+  let quote = quoteFromBook(book, market, outcome);
   const cost = positionCost(position);
-  if (!quote.ask || !cost) {
-    log("⏭️ 持仓暂不挂卖", `outcome=${outcome.name}`, "缺少卖一或成本价");
+  if (!cost) {
+    log("⏭️ 持仓暂不挂卖", `outcome=${outcome.name}`, "缺少成本价");
     return;
   }
-  const target = calculateSellPrice(market, quote, cost);
+  let directSellAtBid = shouldDirectSellAtBid(quote, cost);
+  if (directSellAtBid) {
+    const matchingBuys = openOrders.filter(order => matchingOrder(order, market.id, tokenId, outcome.id) && orderSide(order) === "BUY");
+    if (matchingBuys.some(order => !orderId(order))) {
+      log("⚠️ 买一价直接卖出跳过", `outcome=${outcome.name}`, "存在无法识别订单ID的对应买单，避免自成交");
+      return true;
+    }
+    if (matchingBuys.length) {
+      const cancelled = await cancelOrders(matchingBuys, "买一价直接卖出前撤销对应买单");
+      if (LIVE_TRADING && cancelled < matchingBuys.length) return true;
+      try {
+        quote = quoteFromBook(await getBook(market.id), market, outcome);
+      } catch (error) {
+        log("⚠️ 直接卖出前刷新盘口失败", `outcome=${outcome.name}`, error.message);
+        return true;
+      }
+      directSellAtBid = shouldDirectSellAtBid(quote, cost);
+    }
+  }
+  if (!directSellAtBid && !quote.ask) {
+    log("⏭️ 持仓暂不挂卖", `outcome=${outcome.name}`, "缺少卖一");
+    return;
+  }
+  const target = directSellAtBid ? quote.bid.price : calculateSellPrice(market, quote, cost);
   if (!target) {
     log("⏭️ 持仓暂不挂卖", `outcome=${outcome.name}`, "目标价会立即成交");
     return;
@@ -630,54 +658,55 @@ async function managePosition(position, market, book, openOrders) {
     const nonOptimalOrders = sellOrders.filter(order => !targetSellOrders.includes(order));
     if (nonOptimalOrders.some(order => !orderId(order))) {
       log("⚠️ 非最优卖单整理跳过", `outcome=${outcome.name}`, "存在无法识别订单ID，避免重复卖出");
-      return;
+      return directSellAtBid;
     }
     if (nonOptimalOrders.length) {
       const cancelled = await cancelOrders(nonOptimalOrders, "保留最优满额卖单，撤销非最优卖单");
-      if (cancelled < nonOptimalOrders.length) return;
+      if (cancelled < nonOptimalOrders.length) return directSellAtBid;
       log("🧹 保留最优满额卖单", `outcome=${outcome.name}`, `keptOrders=${targetSellOrders.length}`, `cancelled=${cancelled}`);
-      return;
+      return directSellAtBid;
     }
     const coverage = targetSellOrders.reduce((sum, order) => sum + orderQuantity(order), 0n);
-    if (targetSellOrders.some(order => orderQuantity(order) <= 0n)) return;
+    if (targetSellOrders.some(order => orderQuantity(order) <= 0n)) return directSellAtBid;
     const remaining = sharesWei - coverage;
-    if (remaining <= 0n) return;
-    if (remaining < 1n * 10n ** 18n) return;
+    if (remaining <= 0n) return directSellAtBid;
+    if (remaining < 1n * 10n ** 18n) return directSellAtBid;
     const pending = pendingPositionSell(market.id, tokenId);
-    if (pending && pending.quantityWei >= remaining) return;
+    if (pending && pending.quantityWei >= remaining) return directSellAtBid;
     const result = await createLimitOrder(market, Side.SELL, tokenId, target, remaining, marketEndAt(market));
     pendingPositionSells.set(`${market.id}:${tokenId}`, { price: targetPrice, quantityWei: remaining, createdAt: Date.now() });
-    log("📤 补挂最优卖单", `outcome=${outcome.name}`, `shares=${(Number(remaining) / 1e18).toFixed(4)}`, `keptOrders=${targetSellOrders.length}`, `price=${target}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
-    return;
+    log("📤 补挂最优卖单", `outcome=${outcome.name}`, `shares=${(Number(remaining) / 1e18).toFixed(4)}`, `keptOrders=${targetSellOrders.length}`, `price=${target}`, `mode=${directSellAtBid ? "direct-limit-at-bid" : "resting-limit"}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
+    return directSellAtBid;
   }
   if (sharesWei >= rewardQuantityWei && sellOrders.length) {
     if (sellOrders.some(order => !orderId(order))) {
       log("⚠️ 小卖单合并跳过", `outcome=${outcome.name}`, "存在无法识别订单ID，避免重复卖出");
-      return;
+      return directSellAtBid;
     }
     const cancelled = await cancelOrders(sellOrders, "持仓达到积分门槛，撤销非最优卖单并合并重挂");
-    if (cancelled < sellOrders.length) return;
+    if (cancelled < sellOrders.length) return directSellAtBid;
     pendingPositionSells.delete(`${market.id}:${tokenId}`);
     log("🧹 合并卖单", `outcome=${outcome.name}`, `orders=${sellOrders.length}`, `positionShares=${(Number(sharesWei) / 1e18).toFixed(4)}`);
-    return;
+    return directSellAtBid;
   }
   const existing = sellOrders[0];
   const oldPrice = orderPrice(existing);
   const oldQuantity = orderQuantity(existing);
   if (sellOrders.length === 1 && existing && oldPrice
     && Math.abs(oldPrice - priceNumber(targetWei)) <= Number(tick(market)) / 1e18
-    && (!oldQuantity || oldQuantity + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei)) return;
+    && (!oldQuantity || oldQuantity + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei)) return directSellAtBid;
   const pending = pendingPositionSell(market.id, tokenId);
   if (pending && Math.abs(pending.price - priceNumber(targetWei)) <= Number(tick(market)) / 1e18
-    && pending.quantityWei + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei && sellOrders.length <= 1) return;
+    && pending.quantityWei + SELL_QUANTITY_TOLERANCE_WEI >= sharesWei && sellOrders.length <= 1) return directSellAtBid;
   if (sellOrders.length) {
     const cancelled = await cancelOrders(sellOrders, "持仓卖价或数量变化");
-    if (LIVE_TRADING && cancelled < sellOrders.length) return;
+    if (LIVE_TRADING && cancelled < sellOrders.length) return directSellAtBid;
   }
-  if (sharesWei < 1n * 10n ** 18n) return;
+  if (sharesWei < 1n * 10n ** 18n) return directSellAtBid;
   const result = await createLimitOrder(market, Side.SELL, tokenId, target, sharesWei, marketEndAt(market));
   pendingPositionSells.set(`${market.id}:${tokenId}`, { price: priceNumber(targetWei), quantityWei: sharesWei, createdAt: Date.now() });
-  log("📤 挂持仓卖单", `outcome=${outcome.name}`, `shares=${(Number(sharesWei) / 1e18).toFixed(4)}`, `cost=${cost.toFixed(4)}`, `bid=${quote.bid?.price ?? "-"}`, `ask=${quote.ask.price}`, `price=${target}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
+  log("📤 挂持仓卖单", `outcome=${outcome.name}`, `shares=${(Number(sharesWei) / 1e18).toFixed(4)}`, `cost=${cost.toFixed(4)}`, `bid=${quote.bid?.price ?? "-"}`, `ask=${quote.ask?.price ?? "-"}`, `price=${target}`, `mode=${directSellAtBid ? "direct-limit-at-bid" : "resting-limit"}`, `live=${LIVE_TRADING}`, `id=${orderId(result) || "paper"}`);
+  return directSellAtBid;
 }
 
 async function manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget) {
@@ -781,7 +810,8 @@ async function monitorOpenBuyOrders() {
           ? null
           : priceTicks(state.confirmedPrice, market);
 
-        if (!inConfiguredWindow()) reasons.push("不在配置挂买时段");
+        const windowStatus = configuredWindowStatus(market);
+        if (!windowStatus.open) reasons.push(`不在${windowStatus.marketName}配置挂买时段`);
         if (!quote.bid || !ownPrice || bidTicks !== ownTicks) reasons.push("买一已变化");
         if (ownQuantity < MIN_ORDER_SHARES) reasons.push(`剩余数量低于${MIN_ORDER_SHARES}shares`);
         if (ownPrice < MIN_BUY_PRICE) reasons.push(`挂单价格低于${MIN_BUY_PRICE}`);
@@ -886,7 +916,7 @@ async function cycle() {
     for (const [marketId, market] of nextMarkets) lastMarkets.set(marketId, market);
     const loadedCategories = new Set([...lastMarkets.values()].map(market => market.categorySlug));
     const unavailable = markets.filter(result => !result.market).map(result => `${result.categorySlug}=${result.unavailableReason}`);
-    log("📚 市场加载", `configured=${CATEGORY_SLUG.length}`, `loaded=${loadedCategories.size}`, `marketIds=${lastMarkets.size}`, `unavailable=${unavailable.join(";") || "none"}`);
+    log("📚 市场加载", `configured=${CATEGORY_SLUGS.length}`, `loaded=${loadedCategories.size}`, `marketIds=${lastMarkets.size}`, `unavailable=${unavailable.join(";") || "none"}`);
     if (!lastMarkets.size) throw new Error("没有可做市的 Up/Down 市场");
 
     const [positions, openOrders, balanceWei, marketData] = await Promise.all([
@@ -912,15 +942,22 @@ async function cycle() {
       const buyingAllowed = market.marketDataUnavailable
         ? { ok: false, reason: market.marketDataUnavailable }
         : canPlaceBuys(market, stats);
-      log("📊 风控", `market=${market.id}`, `category=${market.categorySlug}`, `window=${inConfiguredWindow()}`, `buy=${buyingAllowed.ok}`, `reason=${buyingAllowed.reason || "ok"}`, `trades5m=${stats.trades}`, `shares5m=${stats.shares.toFixed(1)}`, `maxTrade=${stats.maxShares.toFixed(1)}`);
+      const windowStatus = configuredWindowStatus(market);
+      log("📊 风控", `market=${market.id}`, `category=${market.categorySlug}`, `marketGroup=${windowStatus.marketName}`, `window=${windowStatus.open}`, `beijingTime=${windowStatus.nowText}`, `buy=${buyingAllowed.ok}`, `reason=${buyingAllowed.reason || "ok"}`, `trades5m=${stats.trades}`, `shares5m=${stats.shares.toFixed(1)}`, `maxTrade=${stats.maxShares.toFixed(1)}`);
+      const directSellTokenIds = new Set();
       for (const position of positions.filter(item => String(positionMarketId(item)) === String(market.id))) {
-        await managePosition(position, market, book, openOrders);
+        const directSellAtBid = await managePosition(position, market, book, openOrders);
+        if (directSellAtBid) directSellTokenIds.add(String(positionTokenId(position)));
       }
       if (!buyingAllowed.ok) {
         await cancelOrders(openOrders.filter(order => String(orderMarketId(order)) === String(market.id) && orderSide(order) === "BUY"), buyingAllowed.reason);
         continue;
       }
       for (const outcome of market.outcomes.slice(0, 2)) {
+        if (directSellTokenIds.has(String(outcome.onChainId))) {
+          log("⏭️ 跳过挂买", `outcome=${outcome.name}`, "持仓正在以买一价直接限价卖出");
+          continue;
+        }
         // Each market/outcome has an independent cap equal to the account balance.
         const balanceBudget = { limitWei: balanceWei };
         await manageBuy(market, outcome, book, positions, openOrders, buyingAllowed, balanceBudget);
@@ -941,7 +978,7 @@ async function cycle() {
 }
 
 async function main() {
-  log("🤖 上证指数涨跌做市脚本启动", `live=${LIVE_TRADING}`, `categories=${CATEGORY_SLUG.join(",")}`, `windows=${QUOTE_WINDOWS_TEXT}`);
+  log("🤖 多市场涨跌做市脚本启动", `live=${LIVE_TRADING}`, `categories=${CATEGORY_SLUGS.join(",")}`, `windows=${formatQuoteSchedules(MARKET_GROUPS)}`);
   if (!LIVE_TRADING) log("📝 当前为纸面模式，不会提交真实订单；设置 SSE_LIVE_TRADING=true 才会下单");
   setInterval(() => {
     monitorOpenBuyOrders().catch(error => log("⚠️ 挂单监控异常", error.message));
