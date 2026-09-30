@@ -311,10 +311,19 @@ function normalizePrivateKey(value) {
   return value.startsWith("0x") ? value : `0x${value}`;
 }
 
-function fetchWithApiKey(input, init = {}) {
+async function fetchWithApiKey(input, init = {}) {
   const headers = new Headers(init.headers);
   if (process.env.ARCUS_API_KEY) headers.set("X-Api-Key", process.env.ARCUS_API_KEY);
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+
+  // The Arcus SDK clears its timeout as soon as the supplied fetch resolves.
+  // Buffer the body here so that its AbortSignal also covers a stalled body.
+  const body = await response.arrayBuffer();
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 function loadState() {
@@ -590,6 +599,7 @@ function indicatorText(current) {
 
 async function main() {
   await import("dotenv/config");
+  console.log(`${new Date().toISOString()} Arcus bot initializing...`);
   if (sellAllNvda && !liveTrading) {
     throw new Error("--sell-all-nvda requires --live because it submits a real mainnet order");
   }
