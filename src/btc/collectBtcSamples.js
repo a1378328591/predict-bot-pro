@@ -1,10 +1,14 @@
 import "dotenv/config";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import fetch from "node-fetch";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { estimateTakerBuyCost, estimateTakerSellProceeds } from "./predictTakerFee.js";
 
 const API_BASE_URL = process.env.PREDICT_API_BASE_URL || "https://api.predict.fun";
 const API_KEY = process.env.PREDICT_API_KEY;
+const PROXY_URL = process.env.FICLASH_PROXY_URL || "";
+const PROXY_AGENT = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
 const OUTPUT_DIR = resolve(process.env.BTC_SAMPLE_OUTPUT_DIR || "data/btc");
 const SAMPLE_INTERVAL_MS = positiveInt(process.env.BTC_SAMPLE_INTERVAL_MS, 2_000);
 const CATEGORY_REFRESH_MS = positiveInt(process.env.BTC_CATEGORY_REFRESH_MS, 10_000);
@@ -77,7 +81,7 @@ async function fetchJson(path, params = {}) {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
   }
 
-  const response = await fetch(url, { headers: { "x-api-key": API_KEY } });
+  const response = await fetch(url, { headers: { "x-api-key": API_KEY }, agent: PROXY_AGENT });
   if (!response.ok) throw new Error(`${response.status} ${url.pathname}: ${(await response.text()).slice(0, 300)}`);
   const body = await response.json();
   if (body?.success === false) throw new Error(`API rejected ${url.pathname}: ${JSON.stringify(body).slice(0, 300)}`);
@@ -93,7 +97,7 @@ async function fetchBtcReference() {
     let lastError = null;
     for (const source of sources) {
       try {
-        const response = await fetch(source.url);
+        const response = await fetch(source.url, { agent: PROXY_AGENT });
         if (!response.ok) throw new Error(`${source.name} HTTP ${response.status}`);
         const ticker = await response.json();
         const bid = Number(ticker.bidPrice);
@@ -101,6 +105,7 @@ async function fetchBtcReference() {
         if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) throw new Error(`${source.name} returned an invalid ticker`);
         return {
           source: source.name,
+          fetched_at_ms: Date.now(),
           bid,
           ask,
           mid: (bid + ask) / 2,
@@ -128,28 +133,40 @@ function parseDate(value) {
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
-function getCategoryTimes(category) {
-  const startsAt = parseDate(category?.startsAt ?? category?.startTime ?? category?.startDate);
+function priceIntervalStart(category) {
+  const slugTimestamp = String(category?.slug || "").match(/btc-updown-5m-(\d{10})$/)?.[1];
+  if (slugTimestamp) return new Date(Number(slugTimestamp) * 1_000);
   const endsAt = parseDate(category?.endsAt ?? category?.endTime ?? category?.endDate);
+  return endsAt ? new Date(endsAt.getTime() - 300_000) : null;
+}
+
+function getCategoryTimes(category, nowMs = Date.now()) {
+  const opensAt = parseDate(category?.startsAt ?? category?.startTime ?? category?.startDate);
+  const endsAt = parseDate(category?.endsAt ?? category?.endTime ?? category?.endDate);
+  const intervalStartsAt = priceIntervalStart(category);
   return {
-    starts_at: startsAt?.toISOString() ?? null,
+    market_opens_at: opensAt?.toISOString() ?? null,
+    price_interval_starts_at: intervalStartsAt?.toISOString() ?? null,
     ends_at: endsAt?.toISOString() ?? null,
-    seconds_from_start: startsAt ? (Date.now() - startsAt.getTime()) / 1_000 : null,
-    seconds_to_end: endsAt ? (endsAt.getTime() - Date.now()) / 1_000 : null,
+    seconds_from_price_interval_start: intervalStartsAt ? (nowMs - intervalStartsAt.getTime()) / 1_000 : null,
+    seconds_to_end: endsAt ? (endsAt.getTime() - nowMs) / 1_000 : null,
   };
 }
 
 function isExpectedBtcFiveMinuteCategory(category) {
   if (String(category?.marketVariant || "").toUpperCase() !== "CRYPTO_UP_DOWN") return false;
+  if (String(category?.resolutionProvider || "").toUpperCase() !== "CHAINLINK") return false;
+  if (String(category?.variantData?.priceFeedProvider || "").toUpperCase() !== "CHAINLINK") return false;
+  if (String(category?.variantData?.priceFeedSymbol || "").toUpperCase().replace(/[^A-Z]/g, "") !== "BTCUSDT") return false;
   const text = [category?.slug, category?.title, category?.shortTitle, category?.description, category?.variantData?.priceFeedSymbol]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
   if (!(text.includes("bitcoin") || /(^|[^a-z])btc([^a-z]|$)/.test(text))) return false;
-  const startsAt = parseDate(category?.startsAt ?? category?.startTime ?? category?.startDate);
   const endsAt = parseDate(category?.endsAt ?? category?.endTime ?? category?.endDate);
-  if (!startsAt || !endsAt) return false;
-  return Math.abs((endsAt.getTime() - startsAt.getTime()) / 1_000 - 300) <= 2;
+  const intervalStartsAt = priceIntervalStart(category);
+  if (!intervalStartsAt || !endsAt) return false;
+  return Math.abs((endsAt.getTime() - intervalStartsAt.getTime()) / 1_000 - 300) <= 2;
 }
 
 function getCurrentBtcFiveMinuteSlug() {
@@ -263,9 +280,9 @@ function walkSellBook(bids, targetNotional) {
   };
 }
 
-function updatePriceFeatures(categorySlug, referenceMid) {
+function updatePriceFeatures(categorySlug, referenceMid, sampledAtMs) {
   if (!Number.isFinite(referenceMid)) return null;
-  const now = Date.now();
+  const now = Number.isFinite(Number(sampledAtMs)) ? Number(sampledAtMs) : Date.now();
   const history = priceHistory.get(categorySlug) ?? [];
   history.push({ time: now, price: referenceMid });
   while (history.length && history[0].time < now - 10 * 60_000) history.shift();
@@ -370,8 +387,7 @@ function recordSettlement(item) {
 async function snapshotCategory(item, reference) {
   const category = item.category;
   if (!category || item.finalized) return;
-  const time = getCategoryTimes(category);
-  const referenceFeatures = updatePriceFeatures(item.slug, reference?.mid);
+  const referenceFeatures = updatePriceFeatures(item.slug, reference?.mid, reference?.fetched_at_ms);
   const startPrice = finiteOrNull(category?.variantData?.startPrice);
   const endPrice = finiteOrNull(category?.variantData?.endPrice);
   const markets = Array.isArray(category.markets) ? category.markets : [];
@@ -379,6 +395,8 @@ async function snapshotCategory(item, reference) {
   for (const market of markets) {
     try {
       const rawBook = await fetchOrderbook(market.id);
+      const observedAtMs = Date.now();
+      const time = getCategoryTimes(category, observedAtMs);
       const outcomeSummaries = (market.outcomes || []).map(outcome => {
         const sidedBook = outcomeBook(rawBook, market, outcome);
         return {
@@ -392,8 +410,8 @@ async function snapshotCategory(item, reference) {
 
       appendJsonl("snapshots", {
         schema_version: 1,
-        observed_at: nowIso(),
-        observed_at_ms: Date.now(),
+        observed_at: new Date(observedAtMs).toISOString(),
+        observed_at_ms: observedAtMs,
         category_slug: item.slug,
         category_id: category.id ?? null,
         category_status: category.status ?? null,

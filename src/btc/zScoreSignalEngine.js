@@ -3,6 +3,7 @@ import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, 
 import { resolve } from "node:path";
 import readline from "node:readline";
 import { estimateTakerBuyCost } from "./predictTakerFee.js";
+import { estimateBtc5mProbability } from "./btc5mProbabilityModel.js";
 
 const DATA_DIR = resolve(process.env.BTC_SAMPLE_OUTPUT_DIR || "data/btc");
 const SNAPSHOTS_FILE = resolve(DATA_DIR, "snapshots.jsonl");
@@ -10,17 +11,22 @@ const SETTLEMENTS_FILE = resolve(DATA_DIR, "settlements.jsonl");
 const SIGNALS_FILE = resolve(DATA_DIR, "z_score_signals.jsonl");
 const STATE_FILE = resolve(DATA_DIR, "z_score_signal_state.json");
 
-const VOL_WINDOW_SECONDS = positiveInt(process.env.Z_VOLATILITY_WINDOW_SECONDS, 60);
+const FAST_VOL_WINDOW_SECONDS = positiveInt(process.env.Z_FAST_VOLATILITY_WINDOW_SECONDS, 30);
+const SLOW_VOL_WINDOW_SECONDS = positiveInt(process.env.Z_SLOW_VOLATILITY_WINDOW_SECONDS, 180);
 const MIN_HISTORY_SECONDS = positiveInt(process.env.Z_MIN_HISTORY_SECONDS, 25);
 const MIN_HISTORY_OBSERVATIONS = positiveInt(process.env.Z_MIN_HISTORY_OBSERVATIONS, 10);
 const VOL_FLOOR_BPS = positiveNumber(process.env.Z_VOLATILITY_FLOOR_BPS, 0.5);
-const ENTRY_Z = positiveNumber(process.env.Z_ENTRY_THRESHOLD, 1.5);
-const EDGE_MARGIN = nonnegativeNumber(process.env.Z_EDGE_MARGIN, 0.01);
+const VOLATILITY_UNCERTAINTY = positiveNumber(process.env.Z_VOLATILITY_UNCERTAINTY, 1.15);
+const MICROPRICE_WEIGHT = nonnegativeNumber(process.env.Z_MICROPRICE_WEIGHT, 0.5);
+const ENTRY_Z = positiveNumber(process.env.Z_ENTRY_THRESHOLD, 0.5);
+const EDGE_MARGIN = nonnegativeNumber(process.env.Z_EDGE_MARGIN, 0.005);
+const MIN_ENTRY_PROBABILITY = nonnegativeNumber(process.env.Z_MIN_ENTRY_PROBABILITY, 0.70);
 const MIN_CALIBRATION_SAMPLES = positiveInt(process.env.Z_MIN_CALIBRATION_SAMPLES, 30);
 const CONFIDENCE_Z = positiveNumber(process.env.Z_CONFIDENCE_Z, 1.64);
-const MAX_SPREAD = positiveNumber(process.env.Z_MAX_SPREAD, 0.03);
+const MAX_SPREAD = positiveNumber(process.env.Z_MAX_SPREAD, 0.02);
 const TRADE_NOTIONAL_USD = positiveNumber(process.env.Z_TRADE_NOTIONAL_USD, 10);
 const MAX_SNAPSHOT_AGE_MS = positiveInt(process.env.Z_MAX_SNAPSHOT_AGE_MS, 10_000);
+const MAX_REFERENCE_AGE_MS = positiveInt(process.env.Z_MAX_REFERENCE_AGE_MS, 5_000);
 const TAIL_INTERVAL_MS = positiveInt(process.env.Z_TAIL_INTERVAL_MS, 1_000);
 
 const Z_BINS = [0, 2, 3, 4, 6, 10, Infinity];
@@ -83,6 +89,9 @@ async function streamJsonl(file, onRecord) {
 }
 
 function settlementWinner(settlement) {
+  const startPrice = Number(settlement?.variant_data?.startPrice);
+  const endPrice = Number(settlement?.variant_data?.endPrice);
+  if (Number.isFinite(startPrice) && Number.isFinite(endPrice) && startPrice === endPrice) return null;
   const market = settlement?.markets?.[0];
   return String(market?.outcomes?.find(outcome => outcome?.status === "WON")?.name ?? market?.resolution?.name ?? "").toLowerCase();
 }
@@ -105,8 +114,8 @@ function calibrationKeys(features) {
 function addCalibration(features, won) {
   const keys = calibrationKeys(features);
   if (!keys.length) return;
-  // One market contributes once to a detailed feature cell, reducing correlated snapshots.
-  const detailedKey = `${features.category_slug}|${keys[0]}`;
+  // One market contributes at most once so correlated snapshots cannot inflate confidence.
+  const detailedKey = features.category_slug;
   if (calibrationSeen.has(detailedKey)) return;
   calibrationSeen.add(detailedKey);
   for (const key of keys) {
@@ -119,53 +128,55 @@ function addCalibration(features, won) {
 
 function probabilityEstimate(features) {
   const global = calibration.get("global") ?? { wins: 0, total: 0 };
-  const globalProbability = global.total ? global.wins / global.total : 0.5;
+  const analyticProbability = features.model_probability;
+  const analyticLowerBound = features.conservative_probability;
   for (const key of calibrationKeys(features)) {
     const stats = calibration.get(key);
     if (!stats || stats.total < MIN_CALIBRATION_SAMPLES) continue;
-    const probability = (stats.wins + globalProbability * 4) / (stats.total + 4);
-    const standardError = Math.sqrt(probability * (1 - probability) / (stats.total + 4));
+    const empiricalProbability = (stats.wins + 2) / (stats.total + 4);
+    const standardError = Math.sqrt(empiricalProbability * (1 - empiricalProbability) / (stats.total + 4));
+    const empiricalLowerBound = Math.max(0, empiricalProbability - CONFIDENCE_Z * standardError);
+    const empiricalWeight = Math.min(0.5, stats.total / (stats.total + 100));
     return {
-      source: key,
+      source: `analytic+${key}`,
       samples: stats.total,
       wins: stats.wins,
-      probability,
-      lower_bound: Math.max(0, probability - CONFIDENCE_Z * standardError),
+      probability: analyticProbability * (1 - empiricalWeight) + empiricalProbability * empiricalWeight,
+      lower_bound: analyticLowerBound * (1 - empiricalWeight) + empiricalLowerBound * empiricalWeight,
+      analytic_probability: analyticProbability,
+      analytic_lower_bound: analyticLowerBound,
+      empirical_probability: empiricalProbability,
+      empirical_weight: empiricalWeight,
     };
   }
-  return { source: "insufficient_history", samples: global.total, wins: global.wins, probability: globalProbability, lower_bound: 0 };
+  return {
+    source: "analytic_diffusion",
+    samples: global.total,
+    wins: global.wins,
+    probability: analyticProbability,
+    lower_bound: analyticLowerBound,
+    analytic_probability: analyticProbability,
+    analytic_lower_bound: analyticLowerBound,
+    empirical_probability: null,
+    empirical_weight: 0,
+  };
 }
 
-function updateVolatility(snapshot) {
+function updatePriceHistory(snapshot) {
   const slug = snapshot.category_slug;
-  const time = Number(snapshot.observed_at_ms);
-  const price = Number(snapshot.reference_price?.mid);
+  const fetchedAt = Number(snapshot.reference_price?.fetched_at_ms);
+  const time = Number.isFinite(fetchedAt) ? fetchedAt : Number(snapshot.observed_at_ms);
+  const bid = Number(snapshot.reference_price?.bid);
+  const ask = Number(snapshot.reference_price?.ask);
+  const price = (bid + ask) / 2;
   if (!slug || !Number.isFinite(time) || !(price > 0)) return null;
 
-  const history = histories.get(slug) ?? { points: [], returns: [] };
-  const previous = history.points.at(-1);
-  if (previous) {
-    const elapsedSeconds = (time - previous.time) / 1_000;
-    if (elapsedSeconds > 0 && elapsedSeconds <= 10) {
-      history.returns.push({ time, elapsedSeconds, logReturn: Math.log(price / previous.price) });
-    }
-  }
-  history.points.push({ time, price });
-
-  const oldestTime = time - VOL_WINDOW_SECONDS * 1_000;
+  const history = histories.get(slug) ?? { points: [] };
+  if (history.points.at(-1)?.time !== time) history.points.push({ time, price });
+  const oldestTime = time - Math.max(FAST_VOL_WINDOW_SECONDS, SLOW_VOL_WINDOW_SECONDS) * 1_000 - 10_000;
   while (history.points.length && history.points[0].time < oldestTime) history.points.shift();
-  while (history.returns.length && history.returns[0].time < oldestTime) history.returns.shift();
   histories.set(slug, history);
-
-  const elapsed = history.returns.reduce((sum, item) => sum + item.elapsedSeconds, 0);
-  if (history.returns.length < MIN_HISTORY_OBSERVATIONS || elapsed < MIN_HISTORY_SECONDS) return null;
-  const variancePerSecond = history.returns.reduce((sum, item) => sum + item.logReturn ** 2, 0) / elapsed;
-  return {
-    price,
-    sigma_bps_per_sqrt_second: Math.max(Math.sqrt(variancePerSecond) * 10_000, VOL_FLOOR_BPS),
-    history_seconds: elapsed,
-    observations: history.returns.length,
-  };
+  return history.points;
 }
 
 function buyQuote(snapshot, direction) {
@@ -194,53 +205,123 @@ function buyQuote(snapshot, direction) {
 }
 
 function features(snapshot) {
-  const volatility = updateVolatility(snapshot);
   const startPrice = Number(snapshot.start_price);
-  const remainingSeconds = Number(snapshot.timing?.seconds_to_end);
-  if (!volatility || !(startPrice > 0) || !(remainingSeconds > 0)) return null;
+  const reference = snapshot.reference_price || {};
+  const fetchedAt = Number(reference.fetched_at_ms);
+  const referenceTime = Number.isFinite(fetchedAt) ? fetchedAt : Number(snapshot.observed_at_ms);
+  const endTime = new Date(snapshot.timing?.ends_at || "").getTime();
+  const remainingSeconds = (endTime - referenceTime) / 1_000;
+  const provider = String(snapshot.price_feed_provider || "").toLowerCase();
+  const symbol = String(snapshot.price_feed_symbol || "").toLowerCase().replace(/[^a-z]/g, "");
+  const referenceAgeMs = Number.isFinite(fetchedAt) ? Number(snapshot.observed_at_ms) - referenceTime : 0;
+  if (provider !== "chainlink" || symbol !== "btcusdt") return null;
+  if (!Number.isFinite(referenceAgeMs) || referenceAgeMs < 0 || referenceAgeMs > MAX_REFERENCE_AGE_MS) return null;
+  const points = updatePriceHistory(snapshot);
+  if (!points || !(startPrice > 0) || !(remainingSeconds > 0)) return null;
 
-  const logDeviation = Math.log(volatility.price / startPrice);
-  if (!Number.isFinite(logDeviation) || logDeviation === 0) return null;
-  const direction = logDeviation > 0 ? "up" : "down";
-  const quote = buyQuote(snapshot, direction);
-  if (!quote) return null;
+  const model = estimateBtc5mProbability({
+    startPrice,
+    bid: reference.bid,
+    ask: reference.ask,
+    bidSize: reference.bid_size,
+    askSize: reference.ask_size,
+    remainingSeconds,
+    points,
+    nowMs: referenceTime,
+    fastWindowSeconds: FAST_VOL_WINDOW_SECONDS,
+    slowWindowSeconds: SLOW_VOL_WINDOW_SECONDS,
+    minimumHistorySeconds: MIN_HISTORY_SECONDS,
+    minimumObservations: MIN_HISTORY_OBSERVATIONS,
+    volatilityFloorBps: VOL_FLOOR_BPS,
+    volatilityUncertainty: VOLATILITY_UNCERTAINTY,
+    micropriceWeight: MICROPRICE_WEIGHT,
+  });
+  if (!model) return null;
 
-  const deviationBps = Math.abs(logDeviation) * 10_000;
-  const zScore = deviationBps / (volatility.sigma_bps_per_sqrt_second * Math.sqrt(remainingSeconds));
-  if (!Number.isFinite(zScore)) return null;
+  const candidates = [
+    { direction: "up", probability: model.upProbability, conservativeProbability: model.conservativeUpProbability },
+    { direction: "down", probability: 1 - model.upProbability, conservativeProbability: model.conservativeDownProbability },
+  ].filter(candidate => candidate.conservativeProbability >= MIN_ENTRY_PROBABILITY).map(candidate => {
+    const quote = buyQuote(snapshot, candidate.direction);
+    return quote ? { ...candidate, quote, edge: candidate.conservativeProbability - quote.cost_per_share } : null;
+  }).filter(Boolean).sort((left, right) => right.edge - left.edge);
+  const selected = candidates[0];
+
+  const deviationBps = Math.abs(Math.log(model.modelPrice / startPrice)) * 10_000;
   return {
     category_slug: snapshot.category_slug,
     observed_at: snapshot.observed_at,
     observed_at_ms: snapshot.observed_at_ms,
-    direction,
+    direction: selected?.direction ?? model.direction,
     remaining_seconds: remainingSeconds,
     start_price: startPrice,
-    reference_price: volatility.price,
+    reference_price: model.mid,
+    microprice: model.microprice,
+    model_price: model.modelPrice,
     deviation_bps: deviationBps,
-    z_score: zScore,
-    ...volatility,
-    ...quote,
+    z_score: model.zScore,
+    signed_z: model.signedZ,
+    model_probability: selected?.probability ?? model.probability,
+    conservative_probability: selected?.conservativeProbability ?? model.conservativeProbability,
+    up_probability: model.upProbability,
+    conservative_up_probability: model.conservativeUpProbability,
+    conservative_down_probability: model.conservativeDownProbability,
+    sigma_bps_per_sqrt_second: model.sigmaBpsPerSqrtSecond,
+    fast_variance_per_second: model.fastVariancePerSecond,
+    slow_variance_per_second: model.slowVariancePerSecond,
+    history_seconds: model.historySeconds,
+    observations: model.observations,
+    raw_model_direction: model.direction,
+    model_edge_before_margin: selected?.edge ?? null,
+    ...(selected?.quote ?? {
+      ask: null,
+      bid: null,
+      spread: null,
+      vwap: null,
+      shares: null,
+      notional_usd: null,
+      taker_fee_usd: null,
+      total_cost_usd: null,
+      cost_per_share: null,
+    }),
   };
 }
 
 function trainOnSnapshot(snapshot) {
   const computed = features(snapshot);
   const winner = settlements.get(snapshot.category_slug);
-  if (computed && winner) addCalibration(computed, computed.direction === winner);
+  const analyticEntry = computed
+    && computed.z_score >= ENTRY_Z
+    && Number.isFinite(computed.cost_per_share)
+    && computed.conservative_probability >= MIN_ENTRY_PROBABILITY
+    && computed.conservative_probability > computed.cost_per_share + EDGE_MARGIN;
+  if (analyticEntry && winner) addCalibration(computed, computed.direction === winner);
 }
 
 function evaluateLiveSnapshot(snapshot) {
   const computed = features(snapshot);
-  if (!computed || computed.z_score < ENTRY_Z) return;
+  if (!computed) return;
   if (Date.now() - computed.observed_at_ms > MAX_SNAPSHOT_AGE_MS) return;
+
+  const modelUpdate = {
+    schema_version: 1,
+    type: "MODEL_UPDATE",
+    observed_at: new Date().toISOString(),
+    features: computed,
+  };
+  appendFileSync(SIGNALS_FILE, JSON.stringify(modelUpdate) + "\n", "utf8");
+
+  if (computed.z_score < ENTRY_Z) return;
+  if (!Number.isFinite(computed.cost_per_share)) return;
+  if (computed.conservative_probability < MIN_ENTRY_PROBABILITY) return;
   if (state.paper_buys?.[computed.category_slug]) return;
 
   const estimate = probabilityEstimate(computed);
   const breakEvenProbability = computed.cost_per_share;
   const requiredProbability = breakEvenProbability + EDGE_MARGIN;
-  if (estimate.samples < MIN_CALIBRATION_SAMPLES || estimate.lower_bound <= requiredProbability) {
+  if (estimate.lower_bound <= requiredProbability) {
     if (!state.paper_skips?.[computed.category_slug]) {
-      const reason = estimate.samples < MIN_CALIBRATION_SAMPLES ? "insufficient_calibration_samples" : "probability_lower_bound_below_required";
+      const reason = "probability_lower_bound_below_required";
       const skip = {
         schema_version: 1,
         type: "PAPER_SKIP",
@@ -266,8 +347,13 @@ function evaluateLiveSnapshot(snapshot) {
     observed_at: new Date().toISOString(),
     strategy: {
       z_entry_threshold: ENTRY_Z,
-      volatility_window_seconds: VOL_WINDOW_SECONDS,
+      model: "dual_volatility_diffusion_v1",
+      fast_volatility_window_seconds: FAST_VOL_WINDOW_SECONDS,
+      slow_volatility_window_seconds: SLOW_VOL_WINDOW_SECONDS,
+      volatility_uncertainty: VOLATILITY_UNCERTAINTY,
+      microprice_weight: MICROPRICE_WEIGHT,
       edge_margin: EDGE_MARGIN,
+      min_entry_probability: MIN_ENTRY_PROBABILITY,
       max_spread: MAX_SPREAD,
       trade_notional_usd: TRADE_NOTIONAL_USD,
     },
@@ -289,9 +375,14 @@ async function bootstrap() {
     if (winner) settlements.set(settlement.category_slug, winner);
   });
   console.log(`Loading ${settlements.size} settled markets for calibration...`);
-  await streamJsonl(SNAPSHOTS_FILE, trainOnSnapshot);
+  let loadedSnapshots = 0;
+  await streamJsonl(SNAPSHOTS_FILE, snapshot => {
+    trainOnSnapshot(snapshot);
+    loadedSnapshots += 1;
+    if (loadedSnapshots % 50_000 === 0) console.log(`Calibration loading: ${loadedSnapshots} snapshots processed...`);
+  });
   tailOffset = existsSync(SNAPSHOTS_FILE) ? statSync(SNAPSHOTS_FILE).size : 0;
-  console.log(`Calibration ready: ${calibration.get("global")?.total || 0} independent feature cells. Watching new snapshots.`);
+  console.log(`Calibration ready: ${calibration.get("global")?.total || 0} independent markets from ${loadedSnapshots} snapshots. Watching new snapshots.`);
 }
 
 async function readTail() {

@@ -1,7 +1,11 @@
 import "dotenv/config";
 import { Wallet } from "ethers";
 import { OrderBuilder, ChainId } from "@predictdotfun/sdk";
+import fetch from "node-fetch";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { logPredict429 } from "./rateLimitLogger.js";
+
+const proxyAgent = process.env.FICLASH_PROXY_URL ? new HttpsProxyAgent(process.env.FICLASH_PROXY_URL) : undefined;
 
 /**
  * =========================
@@ -51,6 +55,7 @@ async function getJwtTokenWithSDK() {
   const messageUrl = "https://api.predict.fun/v1/auth/message";
   const msgRes = await fetch(messageUrl, {
     method: "GET",
+    agent: proxyAgent,
     headers: {
       "x-api-key": PREDICT_API_KEY,
     },
@@ -75,6 +80,7 @@ async function getJwtTokenWithSDK() {
   const authUrl = "https://api.predict.fun/v1/auth";
   const jwtRes = await fetch(authUrl, {
     method: "POST",
+    agent: proxyAgent,
     headers: {
       "Content-Type": "application/json",
       "x-api-key": PREDICT_API_KEY,

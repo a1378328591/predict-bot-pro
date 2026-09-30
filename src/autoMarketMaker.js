@@ -115,6 +115,9 @@ const VOLATILE_MARKET_KEYWORDS = [
   "cryptocurrency",
   "first blood",
   "blood",
+  "ai",
+  "best",
+  "yield",
 ];
 const COMPANY_RANKING_KEYWORDS = ["largest company", "market cap", "market capitalization", "most valuable company"];
 const POLITICAL_MARKET_KEYWORDS = [
@@ -1539,9 +1542,9 @@ async function getBestBid(marketId, market, outcome) {
   try {
     const book = await getPredictBook(marketId);
     return getBestPredictBidFromBook(book, market, outcome);
-  } catch (e) { 
+  } catch (e) {
     console.log("  ⚠️ getBestBid错误: " + e.message);
-    return null; 
+    return null;
   }
 }
 

@@ -1,10 +1,11 @@
 import crypto from "crypto";
+import fetch from "node-fetch";
 
 /**
  * 发送钉钉消息（支持加签机器人）
  * @param {string} text 消息内容
  */
-export async function pushDingTalk(text) {
+export async function pushDingTalk(text, options = {}) {
   const { DING_ACCESS_TOKEN, DING_SECRET } = process.env;
 
   if (!DING_ACCESS_TOKEN) {
@@ -31,6 +32,7 @@ export async function pushDingTalk(text) {
   try {
     const res = await fetch(webhook, {
       method: "POST",
+      ...(options.agent ? { agent: options.agent } : {}),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });

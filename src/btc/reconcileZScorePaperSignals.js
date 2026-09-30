@@ -33,6 +33,9 @@ function loadState() {
 }
 
 function settlementWinner(settlement) {
+  const startPrice = Number(settlement?.variant_data?.startPrice);
+  const endPrice = Number(settlement?.variant_data?.endPrice);
+  if (Number.isFinite(startPrice) && Number.isFinite(endPrice) && startPrice === endPrice) return "tie";
   const market = settlement?.markets?.[0];
   return String(market?.outcomes?.find(outcome => outcome?.status === "WON")?.name ?? market?.resolution?.name ?? "").toLowerCase();
 }
@@ -66,8 +69,9 @@ function main() {
     const totalCost = Number(signal?.features?.total_cost_usd);
     if (!direction || !(shares > 0) || !(totalCost > 0)) continue;
 
-    const won = direction === winner;
-    const payout = won ? shares : 0;
+    const tied = winner === "tie";
+    const won = tied ? null : direction === winner;
+    const payout = tied ? shares * 0.5 : won ? shares : 0;
     const pnl = payout - totalCost;
     const result = {
       schema_version: 1,
@@ -79,6 +83,7 @@ function main() {
       direction,
       winner,
       won,
+      tied,
       entry: {
         ask: signal?.features?.ask,
         vwap: signal?.features?.vwap,
@@ -108,11 +113,13 @@ function main() {
   const totalCost = allResults.reduce((sum, result) => sum + Number(result.entry?.total_cost_usd || 0), 0);
   const totalPnl = allResults.reduce((sum, result) => sum + Number(result.pnl_usd || 0), 0);
   const wins = allResults.filter(result => result.won).length;
+  const ties = allResults.filter(result => result.tied).length;
   console.log(JSON.stringify({
     paper_buy_signals: paperBuys.length,
     settled_signals: allResults.length,
     newly_reconciled: newResults.length,
     wins,
+    ties,
     win_rate: allResults.length ? wins / allResults.length : null,
     total_cost_usd: totalCost,
     total_pnl_usd: totalPnl,

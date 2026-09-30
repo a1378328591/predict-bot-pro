@@ -20,3 +20,4 @@ blockedMarkets.json
 
 # collected BTC market data
 data/btc/
+data/arcus/

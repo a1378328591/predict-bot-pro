@@ -1,0 +1,3 @@
+interface:
+  display_name: "Visual Mask Chat"
+  short_description: "Mask chat text for relay-only forwarding"

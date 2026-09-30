@@ -60,6 +60,8 @@ const QUOTE_SCHEDULE_BY_CATEGORY = compileQuoteSchedules(MARKET_GROUPS);
 const STOP_BUY_BEFORE_CLOSE_MINUTES = 90;
 // 主做市循环间隔；买单确认周期按该循环计数。
 const LOOP_INTERVAL_MS = 30_000;
+// 定时只撤 BUY，让下一轮主循环重新判断并重挂，避免订单长期排在成交前列。
+const PERIODIC_BUY_CANCEL_INTERVAL_MS = 35 * 60_000;
 // 成交风控数据刷新间隔。
 const MATCH_REFRESH_MS = 30_000;
 // BUY 允许的最大买卖价差；0.06 表示 6 个百分点。
@@ -112,6 +114,7 @@ let rpcIndex = 0;
 let cycleRunning = false;
 let monitorRunning = false;
 let positionMonitorRunning = false;
+let periodicBuyCancelRunning = false;
 const buyStates = new Map();
 const pendingPositionSells = new Map();
 const cancelingOrderIds = new Set();
@@ -771,7 +774,7 @@ async function manageBuy(market, outcome, book, positions, openOrders, buyingAll
 }
 
 async function monitorOpenBuyOrders() {
-  if (monitorRunning || cycleRunning || !lastMarkets.size) return;
+  if (monitorRunning || cycleRunning || periodicBuyCancelRunning || !lastMarkets.size) return;
   monitorRunning = true;
   try {
     const [openOrders, books] = await Promise.all([
@@ -833,7 +836,7 @@ async function monitorOpenBuyOrders() {
 }
 
 async function monitorPositions() {
-  if (positionMonitorRunning || cycleRunning || !lastMarkets.size) return;
+  if (positionMonitorRunning || cycleRunning || periodicBuyCancelRunning || !lastMarkets.size) return;
   positionMonitorRunning = true;
   try {
     const [positions, openOrders, books] = await Promise.all([
@@ -875,8 +878,33 @@ async function monitorPositions() {
   }
 }
 
+async function periodicBuyCancelLoop() {
+  while (true) {
+    await sleep(PERIODIC_BUY_CANCEL_INTERVAL_MS);
+
+    while (cycleRunning || monitorRunning || positionMonitorRunning || periodicBuyCancelRunning) {
+      await sleep(500);
+    }
+    if (!lastMarkets.size) continue;
+
+    periodicBuyCancelRunning = true;
+    const startedAt = Date.now();
+    try {
+      const openOrders = await getOpenOrders();
+      const buyOrders = openOrders.filter(order => isConfiguredMarket(orderMarketId(order)) && orderSide(order) === "BUY");
+      log("🕐 定时撤买单运行", `openOrders=${openOrders.length}`, `buyOrders=${buyOrders.length}`);
+      const cancelled = await cancelOrders(buyOrders, "定时刷新买单，避免长期排在成交前列");
+      log("🔄 定时撤买单完成", `cancelled=${cancelled}`, `nextCycleWithinMs=${LOOP_INTERVAL_MS}`, `elapsedMs=${Date.now() - startedAt}`);
+    } catch (error) {
+      log("⚠️ 定时撤买单失败", error.message);
+    } finally {
+      periodicBuyCancelRunning = false;
+    }
+  }
+}
+
 async function cycle() {
-  if (cycleRunning || monitorRunning || positionMonitorRunning) return;
+  if (cycleRunning || monitorRunning || positionMonitorRunning || periodicBuyCancelRunning) return;
   cycleRunning = true;
   try {
     const markets = await getMarkets();
@@ -986,6 +1014,7 @@ async function main() {
   setInterval(() => {
     monitorPositions().catch(error => log("⚠️ 持仓卖单监控异常", error.message));
   }, POSITION_MONITOR_INTERVAL_MS);
+  periodicBuyCancelLoop().catch(error => log("⚠️ 定时撤买单子流程异常", error.message));
   while (true) {
     try {
       await cycle();

@@ -34,7 +34,10 @@ cp .env.example .env
 
 ```bash
 pm2 start src/autoMarketMaker.js --name predict-bot --update-env
+pm2 start src/sseCompositeMarketMakerDirect.js --name predict-bot-sse --update-env
 ```
+
+上证指数脚本默认通过 FiClash `http://127.0.0.1:7890` 访问 API、GraphQL 和 BSC RPC，并且仅在北京时间 `08:00-24:00` 挂买单，凌晨 `00:00-08:00` 会撤销已有买单但继续维护持仓卖单。可用 `FICLASH_PROXY_URL` 和 `SSE_QUOTE_WINDOWS` 覆盖；多个买单时段以英文逗号分隔。
 
 ### 足球做市脚本
 

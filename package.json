@@ -15,20 +15,45 @@
     "signal:btc:z": "node src/btc/zScoreSignalEngine.js",
     "execute:btc:z": "node src/btc/zScoreOrderExecutor.js",
     "reconcile:btc:z": "node src/btc/reconcileZScorePaperSignals.js",
+    "signal:btc:reversal": "node src/btc/reversalValueSignalEngine.js",
+    "monitor:btc:reversal-volatility": "node src/btc/reversalVolatilityMonitor.js",
+    "paper:btc:reversal": "node src/btc/runReversalPaper.js",
+    "reconcile:btc:reversal": "node src/btc/reconcileReversalValueSignals.js",
+    "paper:btc:sessions": "node src/btc/runReversalPaper.js",
+    "reconcile:btc:sessions": "node src/btc/reconcileReversalValueSignals.js",
+    "trade:btc:reversal": "node src/btc/runReversalPaper.js",
+    "trade:btc:sessions": "node src/btc/runReversalPaper.js",
+    "stats:btc:live": "node src/btc/summarizeSessionLiveActions.js",
+    "trade:copy:wangcai": "node src/copyTrading/runWangcaiCopyTrader.js",
+    "stats:copy:wangcai": "node src/copyTrading/summarizeWangcaiCopyTrades.js",
+    "trade:arcus": "node src/arcus/tradeBot.js",
+    "trade:arcus:live": "node src/arcus/tradeBot.js --live",
+    "backfill:arcus": "node src/arcus/backfillCandles.js",
+    "backtest:btc:sessions": "node src/btc/backtestSessionStrategies.js",
+    "signal:btc:5m": "node src/btc/zScoreSignalEngine.js",
+    "execute:btc:5m": "node src/btc/zScoreOrderExecutor.js",
+    "dashboard:btc:5m": "node src/btc/btc5mDashboardServer.js",
+    "trade:btc:5m": "node src/btc/runBtc5mTrader.js",
     "check:rate-limit": "node scripts/check-rate-limit.js",
     "find:leaderboard-balance": "node src/findLeaderboardBalance.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "monitor:address-positions": "node src/monitorAddressPositions.js",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=18.18"
+  },
   "dependencies": {
+    "@arcus-xyz/arcus-spot-sdk": "^1.0.2",
     "@predictdotfun/sdk": "^1.3.2",
     "dotenv": "^17.4.2",
-    "ethers": "^6.16.0",
+    "ethers": "^6.17.0",
     "https-proxy-agent": "^7.0.6",
     "node-fetch": "^2.7.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "viem": "^2.57.1"
   }
 }

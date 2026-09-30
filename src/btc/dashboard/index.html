@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BTC 5m Quant Console</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="identity">
+      <span class="mark">B5</span>
+      <div><strong>BTC 5m</strong><span>Quant Console</span></div>
+    </div>
+    <div class="status-strip">
+      <span id="connection" class="status"><i></i>连接中</span>
+      <span id="mode" class="mode">--</span>
+      <time id="clock" title="北京时间（Asia/Shanghai）">--:--:--</time>
+    </div>
+  </header>
+
+  <main>
+    <section class="market-head">
+      <div>
+        <p class="eyebrow" id="market-id">等待市场</p>
+        <h1 id="market-title">BTC Up or Down</h1>
+      </div>
+      <div class="countdown-block">
+        <span>距结算</span>
+        <strong id="countdown">--:--</strong>
+      </div>
+    </section>
+
+    <section class="price-band">
+      <div class="metric primary"><span>Chainlink 起始价</span><strong id="start-price">--</strong></div>
+      <div class="metric primary"><span>Binance Mid</span><strong id="reference-price">--</strong><small id="price-change">--</small></div>
+      <div class="metric"><span>Microprice</span><strong id="microprice">--</strong></div>
+      <div class="metric"><span>标准化偏离</span><strong id="z-score">--</strong><small id="deviation">--</small></div>
+      <div class="metric"><span>实时波动率</span><strong id="sigma">--</strong><small>bps / sqrt(s)</small></div>
+    </section>
+
+    <section class="pnl-band">
+      <div class="pnl-heading"><span>本次启动 · 执行估算</span><small id="pnl-since">--</small></div>
+      <div class="pnl-metric total"><span>总盈亏</span><strong id="total-pnl">$0.00</strong></div>
+      <div class="pnl-metric"><span>已实现</span><strong id="realized-pnl">$0.00</strong></div>
+      <div class="pnl-metric"><span>未实现</span><strong id="unrealized-pnl">$0.00</strong></div>
+      <div class="pnl-metric"><span>投入</span><strong id="deployed">$0.00</strong></div>
+      <div class="pnl-metric"><span>交易 / 胜负</span><strong id="trade-record">0 · 0/0</strong></div>
+    </section>
+
+    <section class="workspace">
+      <div class="probability-panel">
+        <div class="section-title"><h2>结算概率</h2><span id="model-age">等待模型</span></div>
+        <div class="probability-scale">
+          <div class="prob-label up"><span>UP</span><strong id="up-prob">--</strong></div>
+          <div class="prob-track"><div id="up-fill"></div><i id="market-marker"></i></div>
+          <div class="prob-label down"><span>DOWN</span><strong id="down-prob">--</strong></div>
+        </div>
+        <div class="prob-details">
+          <div><span>保守 Up</span><strong id="up-conservative">--</strong></div>
+          <div><span>保守 Down</span><strong id="down-conservative">--</strong></div>
+          <div><span>市场 Up 中间价</span><strong id="market-up">--</strong></div>
+          <div><span>评估范围</span><strong id="model-window">--</strong></div>
+        </div>
+        <div id="decision" class="decision neutral">
+          <div><span id="decision-state">等待信号</span><strong id="decision-direction">--</strong></div>
+          <p id="decision-detail">模型只在最后 120 秒进入交易评估。</p>
+        </div>
+      </div>
+
+      <aside class="rules-panel">
+        <div class="section-title"><h2>入场检查</h2><span id="checks-summary">0 / 5</span></div>
+        <ul class="checks">
+          <li id="check-window"><i></i><span>市场进行中</span><strong>--</strong></li>
+          <li id="check-z"><i></i><span>Z 阈值</span><strong>--</strong></li>
+          <li id="check-spread"><i></i><span>盘口价差</span><strong>--</strong></li>
+          <li id="check-probability"><i></i><span>最低保守概率</span><strong>--</strong></li>
+          <li id="check-edge"><i></i><span>净概率优势</span><strong>--</strong></li>
+        </ul>
+        <div class="execution-config">
+          <span>单笔金额<strong id="notional">--</strong></span>
+          <span>入场边际<strong id="edge-margin">--</strong></span>
+          <span>退出滞后<strong id="exit-margin">--</strong></span>
+        </div>
+      </aside>
+    </section>
+
+    <section class="lower-grid">
+      <div class="book-panel">
+        <div class="section-title"><h2>Predict 盘口</h2><span id="book-spread">--</span></div>
+        <div class="book-tabs" role="tablist">
+          <button class="active" data-side="Up">UP</button><button data-side="Down">DOWN</button>
+        </div>
+        <div class="book-head"><span>买量</span><span>价格</span><span>卖量</span></div>
+        <div id="orderbook" class="orderbook"></div>
+      </div>
+
+      <div class="activity-panel">
+        <div class="section-title"><h2>策略活动</h2><span id="position-status">无策略持仓</span></div>
+        <div id="activity" class="activity"></div>
+      </div>
+    </section>
+
+    <section class="session-panel">
+      <div class="section-title"><h2>本次启动交易明细</h2><span>基于本地执行日志估算，取消或部分成交可能存在偏差</span></div>
+      <div class="session-head"><span>北京时间</span><span>市场</span><span>方向</span><span>状态</span><span>成本</span><span>估值</span><span>盈亏</span></div>
+      <div id="session-trades" class="session-trades"><div class="empty">本次启动后尚无订单</div></div>
+    </section>
+  </main>
+
+  <footer><span id="last-update">尚未收到数据</span><span>只读界面 · 不包含下单控制</span></footer>
+  <script type="module" src="/dashboard.js"></script>
+</body>
+</html>

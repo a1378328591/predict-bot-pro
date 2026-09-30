@@ -1,0 +1,1 @@
+export const SESSION_TREND_FIXED_SHARES = 10;
