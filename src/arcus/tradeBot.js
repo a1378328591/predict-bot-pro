@@ -198,10 +198,18 @@ export function decideAction(previous, current, hasPosition, options = {}) {
   }
   if (hasPosition && Number.isFinite(estimatedReturnPct)
       && estimatedReturnPct >= rules.breakEvenExitPct
-      && sellReasons.length > 0) {
+      && sellReasons.length > 0
+      && options.canExitOnReversal !== false) {
     return {
       action: "SELL",
       reasons: [...sellReasons, `预计净收益 ${estimatedReturnPct.toFixed(2)}%`],
+    };
+  }
+
+  if (hasPosition && sellReasons.length > 0 && options.canExitOnReversal === false) {
+    return {
+      action: "HOLD",
+      reasons: ["尚未达到反转卖出的最短持仓时间", ...sellReasons],
     };
   }
 
@@ -287,7 +295,9 @@ const SETTINGS = {
   kdjPeriod: 9,
   sampleIntervalMs: 15_000,
   candleIntervalMs: 5 * 60_000,
-  timedExitMs: 25 * 60_000,
+  minHoldBeforeReversalMs: 20 * 60_000,
+  maxHoldingMs: 60 * 60_000,
+  positionDustAsset: "0.000001",
   maxCandles: 500,
   requestTimeoutMs: 15_000,
   receiptTimeoutMs: 120_000,
@@ -435,21 +445,32 @@ export function reconcilePositionSnapshot(snapshot, walletPosition, externalAdde
   };
 }
 
-export function timedExitDue(position, positionOpenedAt, observedAt, timedExitMs) {
+export function maxHoldingExitDue(position, positionOpenedAt, observedAt, maxHoldingMs) {
   return BigInt(position) > 0n
     && Number.isFinite(Number(positionOpenedAt))
     && Number(positionOpenedAt) > 0
-    && observedAt - Number(positionOpenedAt) >= timedExitMs;
+    && observedAt - Number(positionOpenedAt) >= maxHoldingMs;
+}
+
+export function normalizeWalletPosition(walletPosition, trackedPosition, dustThreshold) {
+  const wallet = BigInt(walletPosition);
+  const tracked = BigInt(trackedPosition);
+  const dust = BigInt(dustThreshold);
+  if (wallet <= dust) return 0n;
+  if (wallet > tracked && wallet - tracked <= dust) return tracked;
+  return wallet;
 }
 
 async function syncWalletPosition({ client, tokens, publicClient, walletClient, state, walletPosition }) {
-  const actualPosition = walletPosition ?? await publicClient.readContract({
+  const rawWalletPosition = walletPosition ?? await publicClient.readContract({
     address: tokens.asset.address,
     abi: erc20Abi,
     functionName: "balanceOf",
     args: [walletClient.account.address],
   });
   const trackedPosition = BigInt(state.managedPositionAtoms);
+  const dustThreshold = parseUnits(SETTINGS.positionDustAsset, tokens.asset.decimals);
+  const actualPosition = normalizeWalletPosition(rawWalletPosition, trackedPosition, dustThreshold);
   let externalAddedValue = 0n;
   if (actualPosition > trackedPosition) {
     const addedPosition = actualPosition - trackedPosition;
@@ -690,12 +711,13 @@ async function main() {
       saveState(state);
       console.log(`${new Date().toISOString()} price=${price.toFixed(6)} ${tokens.base.symbol} candles=${state.candles.length}`);
 
+      let maxHoldingExitExecuted = false;
       if (liveTrading) {
         await syncWalletPosition({ client, tokens, publicClient, walletClient, state });
         const position = BigInt(state.managedPositionAtoms);
-        if (timedExitDue(position, state.positionOpenedAt, Date.now(), SETTINGS.timedExitMs)) {
+        if (maxHoldingExitDue(position, state.positionOpenedAt, Date.now(), SETTINGS.maxHoldingMs)) {
           const heldMinutes = (Date.now() - state.positionOpenedAt) / 60_000;
-          console.log(`${new Date().toISOString()} TIMED SELL due after ${heldMinutes.toFixed(1)}m; selling ${formatUnits(position, tokens.asset.decimals)} ${tokens.asset.symbol}`);
+          console.log(`${new Date().toISOString()} MAX HOLD SELL due after ${heldMinutes.toFixed(1)}m; selling ${formatUnits(position, tokens.asset.decimals)} ${tokens.asset.symbol}`);
           const result = await executeSwap({
             side: "SELL",
             amount: position,
@@ -708,13 +730,14 @@ async function main() {
           state.entryCostBaseAtoms = "0";
           state.positionOpenedAt = null;
           saveState(state);
-          console.log(`${new Date().toISOString()} TIMED SELL confirmed tx=${result.submitted.txHash} received=${formatUnits(result.actualBuyAmount, tokens.base.decimals)} ${tokens.base.symbol}`);
+          maxHoldingExitExecuted = true;
+          console.log(`${new Date().toISOString()} MAX HOLD SELL confirmed tx=${result.submitted.txHash} received=${formatUnits(result.actualBuyAmount, tokens.base.decimals)} ${tokens.base.symbol}`);
         }
       }
 
       const closedCandles = state.candles.slice(0, -1);
       const closedAt = closedCandles.at(-1)?.time;
-      if (finalized && closedAt && state.lastDecisionCandle !== closedAt) {
+      if (!maxHoldingExitExecuted && finalized && closedAt && state.lastDecisionCandle !== closedAt) {
         const position = BigInt(state.managedPositionAtoms);
         const entryCost = BigInt(state.entryCostBaseAtoms);
         const exitEstimate = position > 0n && entryCost > 0n
@@ -728,9 +751,13 @@ async function main() {
           : 0n;
         const minimumBuy = parseUnits(String(SETTINGS.minBuyNotionalBase), tokens.base.decimals);
         const canBuy = remainingPosition >= minimumBuy && (position === 0n || entryCost > 0n);
+        const canExitOnReversal = position > 0n
+          && Number.isFinite(Number(state.positionOpenedAt))
+          && Date.now() - Number(state.positionOpenedAt) >= SETTINGS.minHoldBeforeReversalMs;
         const decision = evaluateStrategy(closedCandles, position > 0n, {
           estimatedReturnPct: exitEstimate?.estimatedReturnPct,
           canBuy,
+          canExitOnReversal,
           periods: {
             macdFast: SETTINGS.macdFast,
             macdSlow: SETTINGS.macdSlow,

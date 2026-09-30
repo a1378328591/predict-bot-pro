@@ -8,9 +8,10 @@ import {
   ema,
   isMainEntrypoint,
   kdj,
+  maxHoldingExitDue,
+  normalizeWalletPosition,
   reconcilePositionSnapshot,
   rsi,
-  timedExitDue,
 } from "../src/arcus/tradeBot.js";
 
 test("entrypoint detection supports direct Node and PM2 execution", () => {
@@ -60,10 +61,27 @@ test("strategy sells on one reversal signal only after covering costs", () => {
   assert.deepEqual(decision.reasons, ["MACD 死叉", "预计净收益 0.00%"]);
 });
 
+test("strategy blocks reversal exits during the minimum holding period", () => {
+  const previous = { rsi: 55, macd: { macd: 2, signal: 1 }, kdj: { k: 60, d: 50 } };
+  const current = { rsi: 55, macd: { macd: 0, signal: 1 }, kdj: { k: 60, d: 50 } };
+  const decision = decideAction(previous, current, true, {
+    estimatedReturnPct: 0.5,
+    canExitOnReversal: false,
+  });
+  assert.equal(decision.action, "HOLD");
+  assert.deepEqual(decision.reasons, ["尚未达到反转卖出的最短持仓时间", "MACD 死叉"]);
+});
+
 test("strategy enforces quote-aware take-profit and stop-loss", () => {
   const flat = { rsi: 50, macd: { macd: 1, signal: 1 }, kdj: { k: 50, d: 50 } };
-  assert.equal(decideAction(flat, flat, true, { estimatedReturnPct: 1 }).action, "SELL");
-  assert.equal(decideAction(flat, flat, true, { estimatedReturnPct: -3 }).action, "SELL");
+  assert.equal(decideAction(flat, flat, true, {
+    estimatedReturnPct: 1,
+    canExitOnReversal: false,
+  }).action, "SELL");
+  assert.equal(decideAction(flat, flat, true, {
+    estimatedReturnPct: -3,
+    canExitOnReversal: false,
+  }).action, "SELL");
 });
 
 test("dynamic position sizing maps signal strength and caps remaining capacity", () => {
@@ -89,6 +107,13 @@ test("wallet reconciliation clears a stale position after a manual sell", () => 
   });
 });
 
+test("wallet position normalization ignores untradeable token dust", () => {
+  const dust = 1_000_000_000_000n;
+  assert.equal(normalizeWalletPosition(1n, 0n, dust), 0n);
+  assert.equal(normalizeWalletPosition(10_000_000_000_000_000n + 1n, 10_000_000_000_000_000n, dust), 10_000_000_000_000_000n);
+  assert.equal(normalizeWalletPosition(20_000_000_000_000_000n, 10_000_000_000_000_000n, dust), 20_000_000_000_000_000n);
+});
+
 test("wallet reconciliation scales cost after a manual partial sell", () => {
   const result = reconcilePositionSnapshot({
     managedPositionAtoms: "100",
@@ -111,8 +136,8 @@ test("wallet reconciliation adopts a manual position and starts its timer", () =
   assert.equal(result.positionOpenedAt, 2_000);
 });
 
-test("timed exit becomes due after the configured holding period", () => {
-  assert.equal(timedExitDue(1n, 1_000, 25 * 60_000 + 999, 25 * 60_000), false);
-  assert.equal(timedExitDue(1n, 1_000, 25 * 60_000 + 1_000, 25 * 60_000), true);
-  assert.equal(timedExitDue(0n, 1_000, 25 * 60_000 + 1_000, 25 * 60_000), false);
+test("maximum holding exit becomes due after the configured holding period", () => {
+  assert.equal(maxHoldingExitDue(1n, 1_000, 60 * 60_000 + 999, 60 * 60_000), false);
+  assert.equal(maxHoldingExitDue(1n, 1_000, 60 * 60_000 + 1_000, 60 * 60_000), true);
+  assert.equal(maxHoldingExitDue(0n, 1_000, 60 * 60_000 + 1_000, 60 * 60_000), false);
 });
