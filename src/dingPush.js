@@ -43,8 +43,9 @@ export async function pushDingTalk(text, options = {}) {
     } else {
       console.log("✅ 钉钉推送成功");
     }
-  } catch (err) {
-    console.error("❌ 钉钉推送异常:", err);
+  } catch {
+    // node-fetch 异常可能包含带 access_token 的完整 webhook URL，不能输出错误对象。
+    console.error("❌ 钉钉推送异常");
   }
 }
 

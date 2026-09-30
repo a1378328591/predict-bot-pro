@@ -21,3 +21,5 @@ blockedMarkets.json
 # collected BTC market data
 data/btc/
 data/arcus/
+data/copy-trading/wangcai_actions.jsonl
+data/copy-trading/wangcai_state.json

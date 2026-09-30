@@ -30,7 +30,7 @@ const MARKET_GROUPS = [
       "sse-composite-index-up-or-down-on-october-8-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 18:05", end: "2026-10-08 07:55" },
+      { start: "2026-09-30 16:05", end: "2026-10-08 07:55" },
     ],
   },
   {
@@ -40,7 +40,7 @@ const MARKET_GROUPS = [
       "hang-seng-index-up-or-down-on-october-2-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 18:05", end: "2026-10-02 07:55" },
+      { start: "2026-09-30 16:05", end: "2026-10-02 07:55" },
     ],
   },
   {
@@ -50,7 +50,7 @@ const MARKET_GROUPS = [
       "sk-hynix-inc-up-or-down-on-october-1-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 18:05", end: "2026-10-01 07:55" },
+      { start: "2026-09-30 16:05", end: "2026-10-01 07:55" },
     ],
   },
 ];

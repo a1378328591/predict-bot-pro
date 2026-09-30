@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateBuyNotional, decideAction, ema, kdj, rsi } from "../src/arcus/tradeBot.js";
+import {
+  calculateBuyNotional,
+  decideAction,
+  ema,
+  kdj,
+  reconcilePositionSnapshot,
+  rsi,
+  timedExitDue,
+} from "../src/arcus/tradeBot.js";
 
 test("EMA uses an SMA seed and then the exponential formula", () => {
   assert.deepEqual(ema([1, 2, 3, 4, 5], 3), [null, null, 2, 3, 4]);
@@ -54,4 +62,46 @@ test("dynamic position sizing maps signal strength and caps remaining capacity",
   assert.equal(calculateBuyNotional(3, 40, settings), 40);
   assert.equal(calculateBuyNotional(3, 17.25, settings), 17.25);
   assert.equal(calculateBuyNotional(1, 10.99, settings), 0);
+});
+
+test("wallet reconciliation clears a stale position after a manual sell", () => {
+  const result = reconcilePositionSnapshot({
+    managedPositionAtoms: "100",
+    entryCostBaseAtoms: "200",
+    positionOpenedAt: 1_000,
+  }, 0n, 0n, 2_000);
+  assert.deepEqual(result, {
+    managedPositionAtoms: "0",
+    entryCostBaseAtoms: "0",
+    positionOpenedAt: null,
+    changed: true,
+  });
+});
+
+test("wallet reconciliation scales cost after a manual partial sell", () => {
+  const result = reconcilePositionSnapshot({
+    managedPositionAtoms: "100",
+    entryCostBaseAtoms: "1000",
+    positionOpenedAt: 1_000,
+  }, 40n, 0n, 2_000);
+  assert.equal(result.managedPositionAtoms, "40");
+  assert.equal(result.entryCostBaseAtoms, "400");
+  assert.equal(result.positionOpenedAt, 1_000);
+});
+
+test("wallet reconciliation adopts a manual position and starts its timer", () => {
+  const result = reconcilePositionSnapshot({
+    managedPositionAtoms: "0",
+    entryCostBaseAtoms: "0",
+    positionOpenedAt: null,
+  }, 50n, 900n, 2_000);
+  assert.equal(result.managedPositionAtoms, "50");
+  assert.equal(result.entryCostBaseAtoms, "900");
+  assert.equal(result.positionOpenedAt, 2_000);
+});
+
+test("timed exit becomes due after the configured holding period", () => {
+  assert.equal(timedExitDue(1n, 1_000, 25 * 60_000 + 999, 25 * 60_000), false);
+  assert.equal(timedExitDue(1n, 1_000, 25 * 60_000 + 1_000, 25 * 60_000), true);
+  assert.equal(timedExitDue(0n, 1_000, 25 * 60_000 + 1_000, 25 * 60_000), false);
 });

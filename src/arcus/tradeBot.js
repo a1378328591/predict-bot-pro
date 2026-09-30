@@ -287,6 +287,7 @@ const SETTINGS = {
   kdjPeriod: 9,
   sampleIntervalMs: 15_000,
   candleIntervalMs: 5 * 60_000,
+  timedExitMs: 25 * 60_000,
   maxCandles: 500,
   requestTimeoutMs: 15_000,
   receiptTimeoutMs: 120_000,
@@ -323,11 +324,18 @@ function loadState() {
       candles: Array.isArray(parsed.candles) ? parsed.candles.slice(-SETTINGS.maxCandles) : [],
       managedPositionAtoms: String(parsed.managedPositionAtoms || "0"),
       entryCostBaseAtoms: String(parsed.entryCostBaseAtoms || "0"),
+      positionOpenedAt: Number(parsed.positionOpenedAt) || null,
       lastDecisionCandle: Number(parsed.lastDecisionCandle) || null,
     };
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    return { candles: [], managedPositionAtoms: "0", entryCostBaseAtoms: "0", lastDecisionCandle: null };
+    return {
+      candles: [],
+      managedPositionAtoms: "0",
+      entryCostBaseAtoms: "0",
+      positionOpenedAt: null,
+      lastDecisionCandle: null,
+    };
   }
 }
 
@@ -382,6 +390,77 @@ async function estimateExit(client, tokens, assetAmount, entryCostBaseAtoms) {
     proceeds,
     estimatedReturnPct: percentageChange(proceeds, entryCostBaseAtoms),
   };
+}
+
+export function reconcilePositionSnapshot(snapshot, walletPosition, externalAddedValue = 0n, observedAt = Date.now()) {
+  const trackedPosition = BigInt(snapshot.managedPositionAtoms || "0");
+  const trackedEntryCost = BigInt(snapshot.entryCostBaseAtoms || "0");
+  const openedAt = Number(snapshot.positionOpenedAt) || null;
+  let position = BigInt(walletPosition);
+  let entryCost = trackedEntryCost;
+  let positionOpenedAt = openedAt;
+
+  if (position === 0n) {
+    entryCost = 0n;
+    positionOpenedAt = null;
+  } else if (position < trackedPosition) {
+    entryCost = trackedPosition > 0n
+      ? (trackedEntryCost * position) / trackedPosition
+      : BigInt(externalAddedValue);
+  } else if (position > trackedPosition) {
+    entryCost = trackedEntryCost + BigInt(externalAddedValue);
+    if (trackedPosition === 0n) positionOpenedAt = observedAt;
+  }
+
+  if (position > 0n && !positionOpenedAt) positionOpenedAt = observedAt;
+  const next = {
+    managedPositionAtoms: position.toString(),
+    entryCostBaseAtoms: entryCost.toString(),
+    positionOpenedAt,
+  };
+  return {
+    ...next,
+    changed: next.managedPositionAtoms !== String(snapshot.managedPositionAtoms || "0")
+      || next.entryCostBaseAtoms !== String(snapshot.entryCostBaseAtoms || "0")
+      || next.positionOpenedAt !== openedAt,
+  };
+}
+
+export function timedExitDue(position, positionOpenedAt, observedAt, timedExitMs) {
+  return BigInt(position) > 0n
+    && Number.isFinite(Number(positionOpenedAt))
+    && Number(positionOpenedAt) > 0
+    && observedAt - Number(positionOpenedAt) >= timedExitMs;
+}
+
+async function syncWalletPosition({ client, tokens, publicClient, walletClient, state, walletPosition }) {
+  const actualPosition = walletPosition ?? await publicClient.readContract({
+    address: tokens.asset.address,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [walletClient.account.address],
+  });
+  const trackedPosition = BigInt(state.managedPositionAtoms);
+  let externalAddedValue = 0n;
+  if (actualPosition > trackedPosition) {
+    const addedPosition = actualPosition - trackedPosition;
+    externalAddedValue = (await estimateExit(client, tokens, addedPosition, 0n)).proceeds;
+  }
+
+  const reconciled = reconcilePositionSnapshot(
+    state,
+    actualPosition,
+    externalAddedValue,
+    Date.now(),
+  );
+  if (reconciled.changed) {
+    console.log(`${new Date().toISOString()} position sync tracked=${formatUnits(trackedPosition, tokens.asset.decimals)} wallet=${formatUnits(actualPosition, tokens.asset.decimals)} ${tokens.asset.symbol}`);
+    state.managedPositionAtoms = reconciled.managedPositionAtoms;
+    state.entryCostBaseAtoms = reconciled.entryCostBaseAtoms;
+    state.positionOpenedAt = reconciled.positionOpenedAt;
+    saveState(state);
+  }
+  return actualPosition;
 }
 
 async function loadTokens(client) {
@@ -577,10 +656,20 @@ async function main() {
       });
       state.managedPositionAtoms = "0";
       state.entryCostBaseAtoms = "0";
+      state.positionOpenedAt = null;
       saveState(state);
       console.log(`${new Date().toISOString()} SELL confirmed tx=${result.submitted.txHash} sold=${formatUnits(BigInt(result.quote.sellAmount), tokens.asset.decimals)} ${tokens.asset.symbol} quoted=${formatUnits(BigInt(result.quote.buyAmount), tokens.base.decimals)} ${tokens.base.symbol} received=${formatUnits(result.actualBuyAmount, tokens.base.decimals)} ${tokens.base.symbol}`);
       return;
     }
+
+    await syncWalletPosition({
+      client,
+      tokens,
+      publicClient,
+      walletClient,
+      state,
+      walletPosition: assetBalance,
+    });
   }
 
   while (!stopping) {
@@ -590,6 +679,28 @@ async function main() {
       const finalized = addPriceSample(state.candles, price, startedAt);
       saveState(state);
       console.log(`${new Date().toISOString()} price=${price.toFixed(6)} ${tokens.base.symbol} candles=${state.candles.length}`);
+
+      if (liveTrading) {
+        await syncWalletPosition({ client, tokens, publicClient, walletClient, state });
+        const position = BigInt(state.managedPositionAtoms);
+        if (timedExitDue(position, state.positionOpenedAt, Date.now(), SETTINGS.timedExitMs)) {
+          const heldMinutes = (Date.now() - state.positionOpenedAt) / 60_000;
+          console.log(`${new Date().toISOString()} TIMED SELL due after ${heldMinutes.toFixed(1)}m; selling ${formatUnits(position, tokens.asset.decimals)} ${tokens.asset.symbol}`);
+          const result = await executeSwap({
+            side: "SELL",
+            amount: position,
+            client,
+            publicClient,
+            walletClient,
+            tokens,
+          });
+          state.managedPositionAtoms = "0";
+          state.entryCostBaseAtoms = "0";
+          state.positionOpenedAt = null;
+          saveState(state);
+          console.log(`${new Date().toISOString()} TIMED SELL confirmed tx=${result.submitted.txHash} received=${formatUnits(result.actualBuyAmount, tokens.base.decimals)} ${tokens.base.symbol}`);
+        }
+      }
 
       const closedCandles = state.candles.slice(0, -1);
       const closedAt = closedCandles.at(-1)?.time;
@@ -658,11 +769,17 @@ async function main() {
             tokens,
           });
           if (decision.action === "BUY") {
+            if (position === 0n && result.actualBuyAmount > 0n) {
+              state.positionOpenedAt = Date.now();
+            }
             state.managedPositionAtoms = (position + result.actualBuyAmount).toString();
             state.entryCostBaseAtoms = (entryCost + BigInt(result.quote.sellAmount)).toString();
           } else {
             state.managedPositionAtoms = (position - BigInt(result.quote.sellAmount)).toString();
-            if (BigInt(state.managedPositionAtoms) === 0n) state.entryCostBaseAtoms = "0";
+            if (BigInt(state.managedPositionAtoms) === 0n) {
+              state.entryCostBaseAtoms = "0";
+              state.positionOpenedAt = null;
+            }
           }
           console.log(`${new Date().toISOString()} ${decision.action} confirmed tx=${result.submitted.txHash} managedPosition=${formatUnits(BigInt(state.managedPositionAtoms), tokens.asset.decimals)} ${tokens.asset.symbol}`);
         }
