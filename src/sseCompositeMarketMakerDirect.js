@@ -21,36 +21,41 @@ const RPC_URLS = (RPC_URL || "").split(",").map(url => url.trim()).filter(Boolea
 // 直接实盘：真实提交 BUY、SELL 和撤单。
 const LIVE_TRADING = true;
 // 每组市场独立配置 category 和北京时间挂 BUY 区间；区间为 [start, end)，可配置多段。
+// 本次挂单夜：10 月 13 日 16:00 至 10 月 14 日 07:55，统一避开 21:00–24:00。
+// 以下为固定日期窗口；切换交易日时同步更新 categorySlugs 和各段日期。
 const MARKET_GROUPS = [
   {
     name: "上证",
     categorySlugs: [
-      "cxmt-up-or-down-on-october-8-2026",
-      "unitree-up-or-down-on-october-8-2026",
-      "sse-composite-index-up-or-down-on-october-8-2026",
+      "cxmt-up-or-down-on-october-14-2026",
+      "unitree-up-or-down-on-october-14-2026",
+      "sse-composite-index-up-or-down-on-october-14-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 16:05", end: "2026-10-08 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
+      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
     ],
   },
   {
     name: "港股",
     categorySlugs: [
-      "shein-up-or-down-on-october-2-2026",
-      "hang-seng-index-up-or-down-on-october-2-2026",
+      "shein-up-or-down-on-october-14-2026",
+      "hang-seng-index-up-or-down-on-october-14-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 16:05", end: "2026-10-02 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
+      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
     ],
   },
   {
     name: "韩股",
     categorySlugs: [
-      "kospi-composite-index-up-or-down-on-october-1-2026",
-      "sk-hynix-inc-up-or-down-on-october-1-2026",
+      "kospi-composite-index-up-or-down-on-october-14-2026",
+      "sk-hynix-inc-up-or-down-on-october-14-2026",
     ],
     quoteWindows: [
-      { start: "2026-09-30 16:05", end: "2026-10-01 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
+      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
     ],
   },
 ];
@@ -749,7 +754,7 @@ async function manageBuy(market, outcome, book, positions, openOrders, buyingAll
   ));
   const existing = matchingBuys[0];
   if (matchingBuys.length === 1 && existing && orderPrice(existing) && samePriceTick(orderPrice(existing), target, market)
-    && (!orderQuantity(existing) || orderQuantity(existing) >= BigInt(Math.floor(ORDER_SHARES * 1e18)))) return;
+    && (!orderQuantity(existing) || orderQuantity(existing) >= BigInt(Math.floor(MIN_ORDER_SHARES * 1e18)))) return;
 
   const targetWei = priceWei(target, market, "floor");
   const availableWei = balanceBudget.limitWei;
