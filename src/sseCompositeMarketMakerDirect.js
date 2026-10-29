@@ -27,35 +27,38 @@ const MARKET_GROUPS = [
   {
     name: "上证",
     categorySlugs: [
-      "cxmt-up-or-down-on-october-14-2026",
-      "unitree-up-or-down-on-october-14-2026",
-      "sse-composite-index-up-or-down-on-october-14-2026",
+      "cxmt-up-or-down-on-october-30-2026",
+      "unitree-up-or-down-on-october-30-2026",
+      "sse-composite-index-up-or-down-on-october-30-2026",
     ],
     quoteWindows: [
-      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
-      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-16 20:55" },
+      { start: "2026-10-29 00:00", end: "2026-10-30 07:55" },
+      { start: "2026-10-30 11:00", end: "2026-10-30 12:55" },
     ],
   },
   {
     name: "港股",
     categorySlugs: [
-      "shein-up-or-down-on-october-14-2026",
-      "hang-seng-index-up-or-down-on-october-14-2026",
+      "shein-up-or-down-on-october-30-2026",
+      "hang-seng-index-up-or-down-on-october-30-2026",
     ],
     quoteWindows: [
-      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
-      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-16 20:55" },
+      { start: "2026-10-29 00:00", end: "2026-10-30 07:55" },
+      { start: "2026-10-30 11:00", end: "2026-10-30 12:55" },
     ],
   },
   {
     name: "韩股",
     categorySlugs: [
-      "kospi-composite-index-up-or-down-on-october-14-2026",
-      "sk-hynix-inc-up-or-down-on-october-14-2026",
+      "kospi-composite-index-up-or-down-on-october-30-2026",
+      "sk-hynix-inc-up-or-down-on-october-30-2026",
     ],
     quoteWindows: [
-      { start: "2026-10-13 16:00", end: "2026-10-13 21:00" },
-      { start: "2026-10-14 00:00", end: "2026-10-14 07:55" },
+      { start: "2026-10-13 16:00", end: "2026-10-16 20:55" },
+      { start: "2026-10-29 00:00", end: "2026-10-30 07:55" },
+      { start: "2026-10-30 11:00", end: "2026-10-30 12:55" },
     ],
   },
 ];
@@ -107,8 +110,8 @@ const ORDER_MONITOR_GAP_SHARES = 40;
 const POSITION_MONITOR_INTERVAL_MS = 6_000;
 // 允许忽略的持仓/卖单链上数量尾差。
 const SELL_QUANTITY_TOLERANCE_WEI = 1n * 10n ** 18n;
-// 是否启用近 5 分钟成交风控。
-const USE_MATCH_RISK = true;
+// 是否启用近 5 分钟成交风控。GraphQL 暂不可用时先关闭，避免阻止主循环挂 BUY。
+const USE_MATCH_RISK = false;
 // 日志文件路径。
 const LOG_FILE = "sseCompositeMarketMakerDirect.log";
 
